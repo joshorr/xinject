@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.4.1](https://github.com/joshorr/xinject/compare/v1.4.0...v1.4.1) (2025-11-06)
+
+
+### Bug Fixes
+
+* Inform pydantic this is a class-var, and should not be messed with. ([523a9a3](https://github.com/joshorr/xinject/commit/523a9a3dbf7d8c3338db43c1c0dee36b8cfe9829))
+* license ([709f49e](https://github.com/joshorr/xinject/commit/709f49e7a107b51f6223f4a7b781c62f254c807c))
+* only return any particular object once in a dependency-chain call. ([f3c9b0a](https://github.com/joshorr/xinject/commit/f3c9b0a956837ea9e5f4206bda36e6d64a266d89))
+
 ## [1.4.1](https://github.com/xyngular/py-xinject/compare/v1.4.0...v1.4.1) (2023-04-15)
 
 
