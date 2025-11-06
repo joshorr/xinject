@@ -127,7 +127,7 @@ For more info/details see:
 
 """
 import functools
-from typing import TypeVar, Iterable, Type, List, Generic, Callable, Any, Optional, Dict, Set
+from typing import TypeVar, Iterable, Type, List, Generic, Callable, Any, Optional, Dict, Set, ClassVar
 from copy import copy, deepcopy
 from xsentinels import Default
 from xinject import XContext, _private
@@ -422,7 +422,7 @@ class Dependency:
 
     _dependency__meta = None
 
-    obj: Self
+    obj: ClassVar[Self]
     """
     class property/attribute that will return the current dependency for the subclass
     it's asked on by calling `Dependency.grab`, passing no extra arguments and returning the
@@ -604,7 +604,7 @@ class Dependency:
         This makes Resource subclasses have an ability to be used as function decorators
         by default unless this method is overriden to provide some other funcionality.
 
-        If sublcasses do need to override this, I would recemend checking the first positional
+        If subclasses do need to override this, I would recemend checking the first positional
         argument for a callable (and no other arguments are passed in) to maintain their ability
         to be function decorators.
         Something like this:
