@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.4.1](https://github.com/xyngular/py-xinject/compare/v1.4.0...v1.4.1) (2023-04-15)
+
+
+### Bug Fixes
+
+* license ([709f49e](https://github.com/xyngular/py-xinject/commit/709f49e7a107b51f6223f4a7b781c62f254c807c))
+
+## [1.4.0](https://github.com/xyngular/py-xinject/compare/v1.3.0...v1.4.0) (2023-02-19)
+
+
+### Features
+
+* have proxy also forward set/get item dunder methods. ([e471b71](https://github.com/xyngular/py-xinject/commit/e471b7115c2e580e5065280ac11991384ce3bf3b))
+
+## [1.3.0](https://github.com/xyngular/py-xinject/compare/v1.2.0...v1.3.0) (2023-02-03)
+
+
+### Features
+
+* added ability to easily proxy an attribute on dependency. ([0ff42a0](https://github.com/xyngular/py-xinject/commit/0ff42a09c78d16ceaa3981aff25d5c281934944d))
+
+
+### Bug Fixes
+
+* style, add doc comment. ([3ad3817](https://github.com/xyngular/py-xinject/commit/3ad38173d30c3f03184630b7af78f2b89f04d237))
+
+## [1.2.0](https://github.com/xyngular/py-xinject/compare/v1.1.0...v1.2.0) (2023-01-02)
+
+
+### Features
+
+* renamed resource-refs to dependency-refs terminology; ie: `resource_chain() -&gt; dependency_chain()` ([f1f7b08](https://github.com/xyngular/py-xinject/commit/f1f7b08401cf21b1fdbd78c55c3e868205e9c85e))
+
 ## [1.1.0](https://github.com/xyngular/py-xinject/compare/v1.0.2...v1.1.0) (2022-12-13)
 
 
