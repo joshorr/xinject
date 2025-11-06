@@ -983,10 +983,19 @@ class XContext:
             Generator[ResourceTypeVar, None, None]: Resources that were found in the self/parent
                 hierarchy.
         """
+        objs_already_seen = set()
+
         for context in self.parent_chain():
             resource = context.dependency(for_type=for_type, create=create)
-            if resource:
-                yield resource
+            if not resource:
+                continue
+
+            resource_id = id(resource)
+            if resource_id in objs_already_seen:
+                continue
+
+            objs_already_seen.add(resource_id)
+            yield resource
 
     def __copy__(self):
         """ Makes a shallow copy of self.
