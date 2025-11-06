@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/joshorr/xinject/compare/v1.4.1...v1.5.0) (2025-11-06)
+
+
+### Features
+
+* bump version. ([993f143](https://github.com/joshorr/xinject/commit/993f14377d9dd03166e996994763f1d303fa16d2))
+
 ## [1.4.1](https://github.com/joshorr/xinject/compare/v1.4.0...v1.4.1) (2025-11-06)
 
 
