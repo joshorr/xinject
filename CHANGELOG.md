@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.6.0](https://github.com/joshorr/xinject/compare/v1.5.0...v1.6.0) (2026-03-03)
+
+
+### Features
+
+* Allow global dependencies to stick around between pytest, unit-test function runs. ([3c4782c](https://github.com/joshorr/xinject/commit/3c4782cc568052faafb122377cd94a6e7faff0bd))
+
+
+### Bug Fixes
+
+* removed debugging statements. ([e7d2860](https://github.com/joshorr/xinject/commit/e7d2860bfba4fea5be00252263c47103ea943af0))
+
 ## [1.5.0](https://github.com/joshorr/xinject/compare/v1.4.1...v1.5.0) (2025-11-06)
 
 
