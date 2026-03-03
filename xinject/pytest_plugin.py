@@ -50,11 +50,6 @@ def xinject_test_context():
     from .context import (
         XContext, _setup_blank_app_and_thread_root_contexts_globals
     )
-    from zdjango.settings import ZDjangoSettings
-    from xinject import XContext
-
-    settings = ZDjangoSettings.grab()
-    context = XContext.grab()
 
     # Ensure we have a blank slate for the unit-test.
     # This will allocate brand new, blank global app+thread root-contexts.
@@ -64,5 +59,5 @@ def xinject_test_context():
     yield XContext.grab()
 
     # Ensure app+thread root-contexts do not have leftover dependency objects from unit test.
-    # _setup_blank_app_and_thread_root_contexts_globals(keep_global_context=True)
+    _setup_blank_app_and_thread_root_contexts_globals(keep_global_context=True)
 
