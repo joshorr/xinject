@@ -785,7 +785,7 @@ class XContext:
         ## Summary
 
         The whole point of the `xinject.context.XContext` is to have a place to get shared
-        dependencies. This method is the primary way to get a shared resource from a Contet
+        dependencies. This method is the primary way to get a shared resource from a XContext
         directly.
 
         Normally, code will use some other convenience methods, as an example:
@@ -1414,7 +1414,7 @@ class XContext:
     """
 
 
-def _setup_blank_app_and_thread_root_contexts_globals():
+def _setup_blank_app_and_thread_root_contexts_globals(keep_global_context: bool = False):
     """
     Used to create initial global state of app/thread-root contexts containers,
     which keep track of the visible `Contexts` on each thread, and for the app-root `XContext`.
@@ -1429,12 +1429,19 @@ def _setup_blank_app_and_thread_root_contexts_globals():
     It should work exactly the same as the normal, non-uniting app.
     We simply clear and allocate new root/global contexts at the start/end of each
     unit test run via the auto-use fixture.
+
+    Args:
+        keep_global_context: If `False` (default): Will clear global context and all the pre-thread/async-io ones.
+            If `True`: Still clears the per-thread/async-io dependencies but will keep the global ones intact.
+                This is used by the pytest plugin to keep global dependencies but to clear out all the others still
+                automatically between unit-tests.
     """
     global _app_root_context
     global _current_context_contextvar
 
-    _app_root_context = XContext(parent=_TreatAsRootParent, name='AppRoot')
-    _app_root_context._make_current_and_get_reset_token(is_app_root_context=True)
+    if not keep_global_context:
+        _app_root_context = XContext(parent=_TreatAsRootParent, name='AppRoot')
+        _app_root_context._make_current_and_get_reset_token(is_app_root_context=True)
 
     # Keeping this private for now, everything outside of this module should use the XContext class
     # as a ContextManager/ContextDecorator to get/set current context.
@@ -1448,7 +1455,7 @@ def _setup_blank_app_and_thread_root_contexts_globals():
 
 
 # Setup initial global XContext objects/state/containers:
-_setup_blank_app_and_thread_root_contexts_globals()
+_setup_blank_app_and_thread_root_contexts_globals(False)
 
 # These are globals that should be here at this point:
 _app_root_context: XContext

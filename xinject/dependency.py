@@ -190,7 +190,7 @@ class Dependency:
     The only coupling that takes place is to the Resource sub-class it's self.
 
     You can also easily have each thread lazily create seperate instance of your Resource,
-    by inheriting from `PerThreadResource`.
+    by inheriting from `DependencyPerThread`.
 
     Each separate piece of code that uses a particular Resource subclass can be completely
     unaware of each other, and yet each one can take advantage of the shared dependency.
