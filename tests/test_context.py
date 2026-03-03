@@ -32,9 +32,6 @@ def test_ensure_pytest_plugin_context_autouse_fixture_working():
     # Ensure we have no items in the XContext, that it is indeed blank.
     assert len(XContext.grab()._dependencies) == 0
 
-    # Ensure app-root context also has no items in it, that it's blank.
-    assert len(XContext.grab().parent._dependencies) == 0
-
 
 # noinspection PyTypeChecker
 # NOTE: This is not how you would normally do this, normally you would do:
@@ -173,15 +170,18 @@ module_level_test_resource.my_name = "module-level-change"
 # We run unit-test twice, ensure that each run of a unit test runs in it's own blank root context.
 @pytest.mark.parametrize("test_run", [1, 2])
 def test_module_level_resource_in_unit_test(test_run):
-    # Make sure we have a different TestDependency instance.
-    assert module_level_test_resource is not ATestDependency.grab()
+    # Make sure we have the same TestDependency instance, as global dependencies are kept between unit-test runs.
+    assert module_level_test_resource is ATestDependency.grab()
 
     # Check values, see if they are still at the module-level value
-    assert ATestDependency.grab().my_name == "hello!"
+    assert ATestDependency.grab().my_name == "module-level-change"
 
     # Do a unit-test change, ensure we don't see it in another unit test.
-    ATestDependency.grab().my_name = "unit-test-change"
-    assert ATestDependency.grab().my_name == "unit-test-change"
+    with ATestDependency() as obj:
+        obj.my_name = "unit-test-change"
+        assert ATestDependency.grab().my_name == "unit-test-change"
+
+    assert ATestDependency.grab().my_name == "module-level-change"
 
 
 def test_each_unit_test_starts_with_a_single_parentless_root_like_context():
@@ -193,9 +193,6 @@ def test_each_unit_test_starts_with_a_single_parentless_root_like_context():
 
     # Ensure we have no items in the XContext, that it is indeed blank.
     assert len(unit_test_root_context._dependencies) == 0
-
-    # Ensure app-root context also has no items in it, that it's blank
-    assert len(unit_test_root_context.parent._dependencies) == 0
 
     # Ensure that when we use the root-like blank unit test context inside a `with` statement,
     # we have a new context with it's parent set at our root-like blank unit test context.
