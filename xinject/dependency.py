@@ -130,6 +130,8 @@ import functools
 from typing import TypeVar, Iterable, Type, List, Generic, Callable, Any, Optional, Dict, Set, ClassVar
 from copy import copy, deepcopy
 from xsentinels import Default
+from xsentinels.default import DefaultType
+
 from xinject import XContext, _private
 from xinject.errors import XInjectError
 import sys
@@ -159,12 +161,17 @@ else:
     Self = 'Dependency'
 
 
-def is_dependency_thread_sharable(dependency: 'Dependency') -> bool:
+def is_dependency_thread_sharable(dependency: 'Type[Dependency] | Dependency') -> bool:
     # noinspection PyProtectedMember
     return dependency._dependency__meta.get('thread_sharable', True)
 
 
-def attributes_to_skip_while_copying(dependency: 'Dependency') -> Set[str]:
+def is_dependency_removed_between_unittests(dependency: 'Type[Dependency] | Dependency') -> bool:
+    # noinspection PyProtectedMember
+    return dependency._dependency__meta.get('remove_between_unittests', False)
+
+
+def attributes_to_skip_while_copying(dependency: 'Type[Dependency] | Dependency') -> Set[str]:
     # noinspection PyProtectedMember
     return dependency._dependency__meta.get('attributes_to_skip_while_copying', set())
 
@@ -319,13 +326,21 @@ class Dependency:
 
     def __init_subclass__(
             cls,
-            thread_sharable=Default,
-            attributes_to_skip_while_copying: Optional[Iterable[str]] = Default,
+            thread_sharable: bool | DefaultType = Default,
+            remove_between_unittests: bool | DefaultType = Default,
+            attributes_to_skip_while_copying: Iterable[str] | None = Default,
             **kwargs
     ):
         """
 
         Args:
+            remove_between_unittests: If `False` (default): Dependency will be removed from global context before/after
+                as each individual unit-test is run.  When `thread_sharable` is `False` this already happens because
+                all non-global contexts are forgotten before/after each unit-test run.
+                This param controls what happens if the Dependency is in a global-context.  The global-context is
+                not cleared between each unit test run. This `remove_between_unittests` option allows you to opt-intl
+                this behavior if desired on a per-Dependency basis.
+
             thread_sharable: If `False`: While a dependency is lazily auto-created, we will
                 ensure we do it per-thread, and not make it visible to other threads.
                 This is accomplished by only auto-creating the dependency in the thread-root
@@ -409,12 +424,16 @@ class Dependency:
         if parent_meta_dict is None:
             meta_dict = {'attributes_to_skip_while_copying': set()}
         else:
+            # We inherit the options from parent, so make a copy of the parent meta options.
             meta_dict = deepcopy(parent_meta_dict)
 
         cls._dependency__meta = meta_dict
 
         if thread_sharable is not Default:
             meta_dict['thread_sharable'] = thread_sharable
+
+        if remove_between_unittests is not Default:
+            meta_dict['remove_between_unittests'] = remove_between_unittests
 
         if attributes_to_skip_while_copying is not Default:
             attr_set: set = meta_dict['attributes_to_skip_while_copying']

@@ -1442,6 +1442,13 @@ def _setup_blank_app_and_thread_root_contexts_globals(keep_global_context: bool 
     if not keep_global_context:
         _app_root_context = XContext(parent=_TreatAsRootParent, name='AppRoot')
         _app_root_context._make_current_and_get_reset_token(is_app_root_context=True)
+    else:
+        from xinject.dependency import is_dependency_removed_between_unittests, Dependency
+        # Remove any dependencies from/in global context that configure themselves as wanting that.
+        for k in list(_app_root_context._dependencies):
+            k: Type[Dependency]
+            if is_dependency_removed_between_unittests(k):
+                _app_root_context._dependencies.pop(k, None)
 
     # Keeping this private for now, everything outside of this module should use the XContext class
     # as a ContextManager/ContextDecorator to get/set current context.
