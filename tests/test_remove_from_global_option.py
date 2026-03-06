@@ -14,7 +14,7 @@ GlobalDep2.grab().value = 'changed2'
 
 
 def test_remove_from_global():
-    # Before unit test ran, it should have removed `GlobalDep`,
+    # Before unit test ran, it should have removed `GlobalDep1`,
     # and therefore it will now lazily allocate and have its default value.
     assert GlobalDep1.grab().value == 'default1'
     assert GlobalDep2.grab().value == 'changed2'
