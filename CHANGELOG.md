@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/joshorr/xinject/compare/v1.6.0...v1.7.0) (2026-03-06)
+
+
+### Features
+
+* Allow Dependecy sub-classes to opt-into global removal when unit-testing. ([15e7800](https://github.com/joshorr/xinject/commit/15e78004b4610af864fb76380352e5117138b986))
+
 ## [1.6.0](https://github.com/joshorr/xinject/compare/v1.5.0...v1.6.0) (2026-03-03)
 
 
