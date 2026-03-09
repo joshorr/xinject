@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0](https://github.com/joshorr/xinject/compare/v1.7.0...v1.8.0) (2026-03-09)
+
+
+### Features
+
+* add ability to make custom context thread-roots more easily. ([8002bd0](https://github.com/joshorr/xinject/commit/8002bd0f1764c21ac382eb5cceb429e45f59d5cb))
+
 ## [1.7.0](https://github.com/joshorr/xinject/compare/v1.6.0...v1.7.0) (2026-03-06)
 
 
