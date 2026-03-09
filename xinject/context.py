@@ -307,7 +307,8 @@ with statement.
 import contextvars
 import itertools
 import functools
-from typing import TypeVar, Type, Dict, List, Optional, Union, Any, Iterable, Set
+from threading import Lock
+from typing import TypeVar, Type, Dict, List, Optional, Union, Any, Iterable, Set, Self
 from copy import copy
 from xsentinels.default import Default, DefaultType
 from xsentinels.singleton import Singleton
@@ -392,10 +393,23 @@ class XContext:
         # If we are None, we need to create the 'root-context' for current thread.
         if context is None:
             import threading
-            context = XContext(name=f'ThreadRoot-{threading.current_thread().name}')
+            context = XContext(name=f'ThreadRoot(via grab)-{threading.current_thread().name}')
             context._make_current_and_get_reset_token(is_thread_root_context=True)
 
         return context
+
+    @classmethod
+    def create_root(cls, dependencies: Iterable[ResourceTypeVar] | None = None) -> Self:
+        import threading
+
+        # Should not be needed, but just to be sure.
+        _current_context_contextvar.set(None)
+        context = XContext(name=f'ThreadRoot(via create_root)-{threading.current_thread().name}')
+        context._make_current_and_get_reset_token(is_thread_root_context=True)
+        for v in dependencies:
+            context.add(v)
+        return context
+
 
     @classmethod
     def current(cls, for_type: Type[C]) -> C:
@@ -631,6 +645,7 @@ class XContext:
                 this as it's name to make debugging easier.
 
         """
+        self._lock = Lock()
 
         # This means we were used directly as a function decorator, ie:
         # >>> @XContext
@@ -997,6 +1012,23 @@ class XContext:
             objs_already_seen.add(resource_id)
             yield resource
 
+    def all_dependencies_from_chain(
+            self, *, exclude_app_root: bool = False, exclude_non_thread_sharable: bool = False
+    ) -> dict[Type[ResourceTypeVar], ResourceTypeVar]:
+        deps = {}
+        for ctx in reversed(self.parent_chain()):
+            if ctx is _app_root_context and exclude_app_root:
+                continue
+            deps.update(ctx._dependencies)
+
+        if exclude_non_thread_sharable:
+            from xinject.dependency import is_dependency_thread_sharable
+            for k in list(deps.keys()):
+                if not is_dependency_thread_sharable(k):
+                    deps.pop(k)
+
+        return deps
+
     def __copy__(self):
         """ Makes a shallow copy of self.
 
@@ -1093,62 +1125,69 @@ class XContext:
             ...     assert XContext.grab() is copied_and_activated_context
             ...     assert XContext.grab() is not some_context
         """
-        new_ctx = self
-        if self._is_active:
-            # We are already 'activated', make shallow copy + sibling...
-            new_ctx = self.copy()
-            new_ctx._sibling = self
+        with self._lock:
+            new_ctx = self
+            if self._is_active:
+                # We are already 'activated', make shallow copy + sibling...
+                new_ctx = self.copy()
+                new_ctx._sibling = self
 
-        # Check to make sure new_ctx is not currently active, if it is we either need to:
-        #   make a copy of self and activate that instead
-        #   raise an error.
+            # Check to make sure new_ctx is not currently active, if it is we either need to:
+            #   make a copy of self and activate that instead
+            #   raise an error.
 
-        token = new_ctx._make_current_and_get_reset_token()
-        self._reset_token_stack.append(token)
-        return new_ctx
+            token = new_ctx._make_current_and_get_reset_token()
+            self._reset_token_stack.append(token)
+            return new_ctx
 
     def __exit__(self, *args, **kwargs):
         # Makes it possible to use a XContext object in a `with XContext():` statement.
-        token = self._reset_token_stack.pop()
+        with self._lock:
+            token = self._reset_token_stack.pop()
 
-        current_context = XContext.grab()
+            current_context = XContext.grab()
 
-        if current_context._sibling:
-            assert current_context._sibling is self, (
-                f"Exiting a sibling ({current_context._sibling}), but sibling was not ({self})"
+            if current_context._sibling:
+                assert current_context._sibling is self, (
+                    f"Exiting a sibling ({current_context._sibling}), but sibling was not ({self})"
+                )
+                context_to_deactivate = current_context
+            else:
+                assert current_context is self, (
+                    f"A XContext ({self}) was exited, and was not current context ({current_context})"
+                )
+                context_to_deactivate = self
+
+            assert not context_to_deactivate._reset_token_stack, (
+                f"A XContext ({self}) was exited, and there was still a reset-token on stack."
             )
-            context_to_deactivate = current_context
-        else:
-            assert current_context is self, (
-                f"A XContext ({self}) was exited, and was not current context ({current_context})"
-            )
-            context_to_deactivate = self
 
-        assert not context_to_deactivate._reset_token_stack, (
-            f"A XContext ({self}) was exited, and there was still a reset-token on stack."
-        )
+        with context_to_deactivate._lock:
+            # Doing this to be extra-cautious, XContext should dynamically look up current
+            # context if it's not active anymore
+            # (ie: outside-of / not in python ContextVar: `_current_context_contextvar`).
+            #
+            # Reset context that is not active anymore back to Default if it had a parent.
+            # if the parent is None, it should remain as None.
+            # A `Default` parent means it looks up parent dynamically each time (to the current one).
+            _current_context_contextvar.reset(token)
 
-        # Doing this to be extra-cautious, XContext should dynamically look up current
-        # context if it's not active anymore
-        # (ie: outside-of / not in python ContextVar: `_current_context_contextvar`).
-        #
-        # Reset context that is not active anymore back to Default if it had a parent.
-        # if the parent is None, it should remain as None.
-        # A `Default` parent means it looks up parent dynamically each time (to the current one).
-        _current_context_contextvar.reset(token)
+            context_to_deactivate._is_active = False
+            context_to_deactivate._reset_caches()
 
-        context_to_deactivate._is_active = False
-        context_to_deactivate._reset_caches()
+        # TODO: If I still have `children` myself, I need to make a copy of all my stuff
+        #   they don't have and put it in them???
 
-        if context_to_deactivate._parent:
-            # Remove self from children, reset parent/caches.
-            context_to_deactivate._parent._children.remove(context_to_deactivate)
-            context_to_deactivate._parent = Default
+        if v := context_to_deactivate._parent:
+            with v._lock:
+                # Remove self from children, reset parent/caches.
+                context_to_deactivate._parent._children.remove(context_to_deactivate)
+                context_to_deactivate._parent = Default
 
-        assert not context_to_deactivate._children, (
-            f"XContext ({context_to_deactivate}) still has children after exiting as active "
-            f"({context_to_deactivate._children})."
-        )
+                assert not context_to_deactivate._children, (
+                    f"XContext ({context_to_deactivate}) still has children after exiting as active "
+                    f"({context_to_deactivate._children})."
+                )
 
     def __call__(self, *args, **kwargs):
         """
@@ -1411,6 +1450,11 @@ class XContext:
         >>> @XContext
         >>> def some_method():
         ...     pass
+    """
+
+    _lock: Lock
+    """ Used when modifying the parent/child lists when entering/exiting context managers,
+        to be safe in case we are in another thread.
     """
 
 
