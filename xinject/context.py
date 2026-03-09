@@ -410,7 +410,6 @@ class XContext:
             context.add(v)
         return context
 
-
     @classmethod
     def current(cls, for_type: Type[C]) -> C:
         """ Gets the current context that should be used by default, via the Python 3.7 ContextVar
