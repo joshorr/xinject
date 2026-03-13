@@ -307,12 +307,16 @@ with statement.
 import contextvars
 import itertools
 import functools
+import threading
 from threading import Lock
 from typing import TypeVar, Type, Dict, List, Optional, Union, Any, Iterable, Set, Self
 from copy import copy
 from xsentinels.default import Default, DefaultType
 from xsentinels.singleton import Singleton
 from xinject.errors import XInjectError
+from logging import getLogger
+
+log = getLogger(__name__)
 
 T = TypeVar('T')
 C = TypeVar('C')
@@ -383,7 +387,7 @@ class XContext:
     """
 
     @classmethod
-    def grab(cls) -> 'XContext':
+    def grab(cls, make_if_needed=True) -> 'XContext':
         """
         Gets the current `XContext` that should be used by default. It does this by calling
         `XContext.current`.
@@ -392,6 +396,8 @@ class XContext:
 
         # If we are None, we need to create the 'root-context' for current thread.
         if context is None:
+            if not make_if_needed:
+                return None
             import threading
             context = XContext(name=f'ThreadRoot(via grab)-{threading.current_thread().name}')
             context._make_current_and_get_reset_token(is_thread_root_context=True)
@@ -468,7 +474,7 @@ class XContext:
             self._parent = XContext.grab()
         elif self._parent is _TreatAsRootParent:
             # When you activate a context who should be treated as root, we have a None
-            # parent and we set `_originally_passed_none_for_parent` to False
+            # parent, and we set `_originally_passed_none_for_parent` too False
             # to indicate future activations/copies of the context should NOT be root
             # and should get the 'Default' as their parent.
             self._parent = None
@@ -671,7 +677,7 @@ class XContext:
             functools.update_wrapper(self, __func)
 
         # Unique sequential number.
-        self._name = str(next(_ContextCounter))
+        self._name = f'{threading.current_thread().name} ({next(_ContextCounter)})'
         if name:
             self._name = f'{self._name}-{name}'
 
@@ -1311,7 +1317,7 @@ class XContext:
         return wrapper
 
     # todo: rename this to just 'chain' ?? or context_chain? [it includes 'self' is why].
-    def parent_chain(self) -> List["XContext"]:
+    def parent_chain(self, _log_loop_error=True, _include_self=True) -> List["XContext"]:
         """ A list of self + all parents in priority order.
 
             This is cached the first time we are called if we are currently active
@@ -1335,19 +1341,35 @@ class XContext:
         if chain is not None:
             return chain
 
-        chain = [self]
+        chain = []
+        already_seen = set()
+        if _include_self:
+            chain.append(self)
+            already_seen.add(self)
 
         # This will resolve Default parent if needed, or give us back out explicit parent;
         # or a None if we originally got passed a None for our parent when we were created.
         current_context = self.parent
 
         while current_context:
+            if current_context in already_seen:
+                if not _log_loop_error:
+                    break
+
+                msg = (
+                    f'Found a context loop while getting the parent_chain ({chain}), '
+                    f'already saw ({current_context}) while in self ({self}).'
+                )
+                print(f'ERROR: FOUND LOOP CHAIN: {msg}')
+                raise Exception(msg)
+
+            already_seen.add(current_context)
             chain.append(current_context)
             current_context = current_context.parent
 
         if self._is_active:
             # It's safe to cache parent-chain if we are active, our parent won't change
-            # while we are active. See doc-comment on `XContext._is_active` for more detials.
+            # while we are active. See doc-comment on `XContext._is_active` for more details.
             self._cached_context_chain = chain
 
         return chain
@@ -1361,16 +1383,23 @@ class XContext:
         else:
             types = f'dependency_count={len(types_list)}'
 
-        str = f"XContext(name='{self.name}', {types}"
+        parent = self.parent
+        parent_name = parent.name if parent else "None"
+
+        parent = self._parent
+        _parent_name = parent.name if parent else "None"
+
+        str = f"XContext(name='{self.name}', {types}, parent-name='{parent_name}', active={self._is_active}, _parent='{_parent_name}')"
         if include_parent:
-            str += f', parent={self.parent}'
-        str += ')'
+            for v in self.parent_chain(_log_loop_error=False, _include_self=False):
+                str = f'{str}, {v.__repr__(include_parent=False)}'
         return str
 
     def _reset_caches(self):
         """ Used internally to reset parent-chain, so it will be looked
             up next time they are asked for.
         """
+
         self._cached_context_chain = None
         self._cached_parent_dependencies.clear()
 
