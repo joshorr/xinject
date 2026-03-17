@@ -234,7 +234,8 @@ See below for more advanced usage patterns.
 
 # Parents
 
-A Context can have a parent (`XContext.parent`) or event a chain of them (`XContext.parent_chain`)
+A Context can have a parent (`XContext.parent`) or event a chain of them (`XContext.ctx_chain`).
+The parent is figured out dynamically based on the current thread and a special internal `contextvars.ContextVar`.
 
 Because it's the safest thing to do by default for naive dependencies, Context's normally don't
 consult parents for basic dependencies, they will just create them if they don't already have them.
@@ -308,13 +309,18 @@ import contextvars
 import itertools
 import functools
 import threading
+from _weakrefset import WeakSet
+from functools import cached_property
 from threading import Lock
-from typing import TypeVar, Type, Dict, List, Optional, Union, Any, Iterable, Set, Self
+from typing import TypeVar, Type, Dict, List, Optional, Union, Any, Iterable, Set, Self, Iterator
 from copy import copy
+from uuid import UUID
+
 from xsentinels.default import Default, DefaultType
 from xsentinels.singleton import Singleton
 from xinject.errors import XInjectError
 from logging import getLogger
+from . import _private
 
 log = getLogger(__name__)
 
@@ -334,12 +340,8 @@ __pdoc__ = {
     "XContext.__deepcopy__": True,
     "XContext.__enter__": True,
     "XContext.__exit__": True,
-    "XContext._is_active": True,
 
 }
-
-# Thread-safe / Lock-Free counter
-_ContextCounter = itertools.count()
 
 
 class _TreatAsRootParentType(Singleton):
@@ -387,34 +389,21 @@ class XContext:
     """
 
     @classmethod
-    def grab(cls, make_if_needed=True) -> 'XContext':
+    def grab(cls) -> 'XContext':
         """
         Gets the current `XContext` that should be used by default. It does this by calling
         `XContext.current`.
         """
-        context = _current_context_contextvar.get()
+        ctx = _XContextOrderedStore.current()
 
-        # If we are None, we need to create the 'root-context' for current thread.
-        if context is None:
-            if not make_if_needed:
-                return None
-            import threading
-            context = XContext(name=f'ThreadRoot(via grab)-{threading.current_thread().name}')
-            context._make_current_and_get_reset_token(is_thread_root_context=True)
-
-        return context
+        # If there is nothing in the stack, return thread-root.
+        if ctx is None:
+            return _thread_storage.root_ctx
+        return ctx
 
     @classmethod
-    def create_root(cls, dependencies: Iterable[ResourceTypeVar] | None = None) -> Self:
-        import threading
-
-        # Should not be needed, but just to be sure.
-        _current_context_contextvar.set(None)
-        context = XContext(name=f'ThreadRoot(via create_root)-{threading.current_thread().name}')
-        context._make_current_and_get_reset_token(is_thread_root_context=True)
-        for v in dependencies:
-            context.add(v)
-        return context
+    def thread_root(cls) -> Self:
+        return _thread_storage.root_ctx
 
     @classmethod
     def current(cls, for_type: Type[C]) -> C:
@@ -432,124 +421,13 @@ class XContext:
     def _current_without_creating_thread_root(cls):
         return _current_context_contextvar.get()
 
-    def _make_current_and_get_reset_token(
-        self,
-        is_thread_root_context=False,
-        is_app_root_context=False
-    ) -> Optional[Any]:
-        """ See `XContext.__enter__` docs for more details.
-
-            This method is called by `XContext.__enter__`, but will also pass back the reset
-            token (to be used internally in this module).
-
-            Args:
-                is_thread_root_context: This is simply a flag. You should have used the
-                    `_TreatAsRootParent` as the parent when creating the context
-                    and wanting it to be a 'root-context'.
-
-                is_app_root_context: This tells us to NOT add this XContext to the
-                    per-thread `_current_context_contextvar`.  Instead, we activate
-                    this context as the app-root context that is shared between all threads.
-                    We only ever have one of these, and it's always allocated at
-                    a module-level attributed called `_app_root_context`.
-                    Should never be set to True except for the object allocated at
-                    module-import time into that variable.
-
-                    Only returns None when this is True.
-        """
-
-        if is_app_root_context:
-            self._is_root_context_for_app = True
-            assert self._parent is _TreatAsRootParent, "See my methods doc-comment for details."
-        elif is_thread_root_context:
-            # For debugging purposes, so you know which one was truly the thread-root context
-            # if there is another root-like-context made (for unit tests).
-            self._is_root_context_for_thread = True
-
-            # We set parent to use app-root-context if we are the thread-root-context.
-            self._parent = _app_root_context
-
-        if self._parent is Default:
-            # Side Note: This will be `None` if we are the first XContext on current thread.
-            self._parent = XContext.grab()
-        elif self._parent is _TreatAsRootParent:
-            # When you activate a context who should be treated as root, we have a None
-            # parent, and we set `_originally_passed_none_for_parent` too False
-            # to indicate future activations/copies of the context should NOT be root
-            # and should get the 'Default' as their parent.
-            self._parent = None
-            self._originally_passed_none_for_parent = False
-
-        self._is_active = True
-
-        if is_app_root_context:
-            return None
-
-        # This makes my self the current context permanently on the current-thread.
-        # This is a special context-var [introduced in Python 3.7].
-        #
-        # We return the reset token, but it's only used internally when calling this method.
-        # outside people should ignore token.
-        my_parent = self._parent
-        if my_parent and not my_parent._is_root_context_for_app:
-            my_parent._children.add(self)
-
-        return _current_context_contextvar.set(self)
-
     @property
-    def parent(self) -> Optional["XContext"]:
-        parent = self._parent
-        if self._is_active:
-            if parent is None:
-                return None
-
-            if parent:
-                return parent
-
-            # `parent` is most likely still set as `Default`.
-
-            raise XInjectError(
-                f"Somehow we have a XContext has been activated "
-                f"(ie: has activated via decorator `@` or via `with` "
-                f"at some point and has not exited yet) "
-                f"but still has it's internal parent value set to ({parent}). "
-                f"This indicates some sort of programming error or bug with XContext. "
-                f"An active XContext should NEVER have their parent set at `Default`. "
-                f"It should either be None or an explict parent XContext instance "
-                # Can't resolve parent, would create infinite recursion.
-                f"({self.__repr__(include_parent=False)}). "
-                f"A XContext should either have an explicit parent or a parent of `None` after "
-                f"XContext has been activated via `@` or `with` or activating a "
-                f"`xinject.dependency.Dependency` via `@` or `with` "
-                f"(side note: you can look at XContext._is_active doc-comment for more internal "
-                f"details)."
-            )
-
-        # If we are not 'active' (ie: via `with` or `make_current()` or decorator `@`)
-        # and we have our internal parent set to `Default`;
-        # lookup current active context and make that our 'parent' temporarily (ie: dynamically),
-        # next time we are asked it could change. That's fine as long as we are not 'active'.
-        #
-        # Honestly, looking up dependencies with a non-active context should be pretty rare,
-        # I am allowing it for more of completeness at this point then anything else.
-        # However, it might be more useful at some point.
-        if parent is Default:
-            return XContext.grab()
-
-        if parent in (_TreatAsRootParent, None):
-            return None
-
-        raise XInjectError(
-            f"Somehow we have a XContext that is not active "
-            f"(ie: ever activated via decorator `@` or via `with` or activating a "
-            f"`xinject.dependency.Dependency` via `@` or `with`) but has a specific parent "
-            f"(ie: not None or _TreatAsRootParent or Default). "
-            f"This indicates some sort of programming error or bug with XContext. "
-            f"A XContext should only have an explicit parent if they have "
-            f"been activated via `@` or `with` or activating a `xinject.dependency.Dependency` "
-            f"via `@` or `with` "
-            f"(side note: you can look at XContext._is_active for more internal details)."
-        )
+    def parent(self) -> Self | None:
+        """ Returns the next parent relative to us and the current thead.
+            See `XContext.chain` for details on algorithm.
+        """
+        # Use `chain` to help us find our next parent.
+        return next(self.ctx_chain(yield_self=False), None)
 
     @property
     def name(self) -> str:
@@ -565,7 +443,8 @@ class XContext:
             self, __func=None, *,
             dependencies: Union[Dict[Type, Any], List[Any], Any] = None,
             parent: Union[DefaultType, _TreatAsRootParentType, None] = Default,
-            name: str = None
+            name: str = None,
+            _thread_unique_id: int | None = None,
     ):
         """
         You can give an initial list of dependencies
@@ -574,7 +453,7 @@ class XContext:
         for `parent`, it can be set to `xsentinels.default.Default` (default value); or to `None.
 
         If you don't pass anything to parent, then the default value of `Default` will cause us
-        to lookup the current context and use that for the parent automatically when the
+        to look up the current context and use that for the parent automatically when the
         XContext is activated.
         For more information on activating a context see
         [Activating A XContext](#activating-a-context).
@@ -611,34 +490,8 @@ class XContext:
 
                 By default, no dependencies are initially added to a new XContext.
 
-            parent (Union[xsentinels.default.Default, _TreatAsRootParent, None]): If we should use
-                `xsentinels.default.Default`, treat this as a root-like XContext, or use None as
-                parent.
-
-                Right now the only valid option is to do one of these three options:
-
-                - nothing (ie: leave at `xsentinels.default.Default`): If left as
-                    `xsentinels.default.Default`, We lookup current context and use that as the
-                    parent in self and in copies or when self is used in a `with` statement or as
-                    a decorator.
-                - Pass `None`, indicating to not use any parent for current thread,
-                    even if copied or used in a decorator/with-statement.
-                    This means app-root, and any current thread-root will be ignored.
-                - Pass `_TreatAsRootParent`, indicating to not use any parent, but allow copies
-                    or when used as decorator/with-statement to use the currently activate
-                    XContext as the new copies parent.
-
-                    This option should **ONLY** be used internally in this module.
-
-                    If you use `_TreatAsRootParent` as the value, keep in mind that a root-like
-                    XContext is special, as it never has a parent and is also considered to have
-                    a default parent if it's copied. A context is shallow copied, and the copy
-                    activated when used as a decorator or in a `with` statement.
-
-                    `_TreatAsRootParent ` should only be used INTERNALLY in this module,
-                    it's not currently exposed publicly.
-
-                    See `_TreatAsRootParent` for more details on root-like contexts.
+            parent (Union[xsentinels.default.Default, _TreatAsRootParent, None]): Unused/Ignored,
+                only here for backwards compatibility only.
 
             name (str): Optional name.
                 If left as None, by default, this will simply assign a unique sequential
@@ -650,7 +503,19 @@ class XContext:
                 this as it's name to make debugging easier.
 
         """
-        self._lock = Lock()
+        if _thread_unique_id is not None:
+            self._thread_unique_id = _thread_unique_id
+        else:
+            self._thread_unique_id = _thread_storage.thread_unique_id
+
+        self._thread_name = threading.current_thread().name
+        self._reset_dependencies()
+
+        if not name:
+            name = 'Stack'
+
+        # Unique sequential number.
+        self._name = f'{name}[{threading.current_thread().name}]({_ctx_counter.new_value()})'
 
         # This means we were used directly as a function decorator, ie:
         # >>> @XContext
@@ -675,33 +540,6 @@ class XContext:
             # >>> def some_method():
             # ...     pass
             functools.update_wrapper(self, __func)
-
-        # Unique sequential number.
-        self._name = f'{threading.current_thread().name} ({next(_ContextCounter)})'
-        if name:
-            self._name = f'{self._name}-{name}'
-
-        self._reset_token_stack = []
-        self._dependencies = {}
-        self._parent = None
-        self._cached_parent_dependencies = {}
-        self._children = set()
-
-        if parent is Default:
-            self._parent = Default
-            self._originally_passed_none_for_parent = False
-        elif parent is None:
-            self._parent = None
-            self._originally_passed_none_for_parent = True
-        elif parent is _TreatAsRootParent:
-            self._parent = _TreatAsRootParent
-            self._originally_passed_none_for_parent = False
-            self._is_root_like_context = True
-        else:
-            raise XInjectError(
-                "You must only pass in `Default` or `None` or `_TreatAsRootParentType` for parent "
-                f"when creating a new XContext, got ({parent}) instead."
-            )
 
         # Add any requested initial dependencies.
         if isinstance(dependencies, dict):
@@ -794,7 +632,6 @@ class XContext:
         self._dependencies[for_type] = dependency
         if self._sibling:
             self._sibling.add(dependency, for_type=for_type)
-        self._remove_cached_dependency_and_in_children(for_type)
         return self
 
     def dependency(
@@ -867,7 +704,7 @@ class XContext:
         Otherwise, no other parameters will be sent to init method.
 
         If you have an `for_type` class of any sort
-        that needs extra parameters and you want to use it as a Resource, you can create it
+        that needs extra parameters, and you want to use it as a Resource, you can create it
         yourself and add it to the Context via `add_resource`.  I would recommend in this case a
         class-method on the `for_type` class that would accept these extra parameters and then
         check the current Context and allocate or return the existing context resource as needed.
@@ -881,18 +718,18 @@ class XContext:
                 If `False`: only returns an object if we have it already, otherwise None.
         """
 
-        # If we find it in self, use that; no need to check anything else...
-        obj = self._dependencies.get(for_type, None)
-        if obj is not None:
-            return obj
-
-        # We next check our cached parent deps...
-        obj = self._cached_parent_dependencies.get(for_type, None)
-        if obj is not None:
-            return obj
+        # TODO: Decide if/when to bring back the cached dependencies.
+        #   I have thoughts on the cache-key being the StorageObject or some such and then
+        #   keeping track of all XContext instances weakly, etc;
+        #   but for now to keep things simple and don't do caching.
+        #
+        # # We next check our cached parent deps...
+        # obj = self._cached_parent_dependencies.get(for_type, None)
+        # if obj is not None:
+        #     return obj
 
         # We must now query the parent-chain to find the dependency.
-
+        #
         # If we are the root context for the entire app (ie: app-root between all threads)
         # then we check to see if dependency is thread-sharable.
         #
@@ -912,69 +749,46 @@ class XContext:
         #
         # So, code using a Dependency in general should never have to worry about this None case.
 
-        if self._is_root_context_for_app:
-            from xinject.dependency import is_dependency_thread_sharable
-            if not is_dependency_thread_sharable(for_type):
-                return None
+        from xinject.dependency import is_dependency_thread_sharable
+        is_thread_sharable = is_dependency_thread_sharable(for_type)
 
-        parent_value = None
-        parent = self.parent
+        if self._is_app_root and not is_thread_sharable:
+            # We can't allocate a non-thread-sharable dependency in the app-root context,
+            # and there are no more parents; so we always return `None` in this case.
+            return None
 
-        # Sanity check: If we are active we should have a None or an explicit, non-default parent.
-        if self._is_active and parent is Default:
-            raise XInjectError(
-                "We somehow have a XContext that has been 'activated' but yet has "
-                "their parent still set to `Default`. This is a bug. Active XContext's "
-                "should NEVER have their parent set at `Default`. It should either be None "
-                f"or an explict parent XContext instance, problem instance: {self}"
-            )
+        last_ctx = None
+        for ctx in self.ctx_chain(yield_from_other_threads=is_thread_sharable):
+            last_ctx = ctx
+            obj = ctx._dependencies.get(for_type, None)
+            if obj is not None:
+                # TODO: I have another TODO in this file about caching these, check that for details.
+                # # Store in self (and all other ctx's up to this point) for future reuse?
+                # self._cached_parent_dependencies[for_type] = parent_value
+                return obj
 
-        # If we have a Default parent, then lookup current parent and use them for our 'Parent'.
-        if parent is Default:
-            # An active parent's will never have their self._parent set as Default;
-            # The current context is `active` along with it's parent-chain....
-            # So this should be safe.
-            # Doing an assert here to at least minimally double check this.
-            parent = XContext.grab()
-            if self is parent:
-                raise XInjectError(
-                    f"Somehow have self ({self}) and parent as same instance (XContext), "
-                    f"when self is not currently active and is attempting to find the current "
-                    f"active XContext to use as it's temporary parent."
-                )
-            assert self is not parent, "Somehow have self and parent as same instance."
-
-            # Since our `parent is Default`, we should not be the app-root, or thread-root
-            # context; we also don't want to cache anything our parent retrieves so simply
-            # return whatever our Default parent returns.
-            return parent.dependency(for_type, create=create)
-
-        if parent:
-            parent_value = parent.dependency(for_type, create=create)
-
-        # If we can't create the dependency, we can ask the resoruce to potetially create more of
-        # its self.
-        # We should also not put any value we find in self either.
-        # Simply return the parent_value, whatever it is (None or otherwise)
+        # If we can't create the dependency, we simply return `None`; nothing more to do.
         if not create:
-            return parent_value
+            return None
 
         # We next create dependency if we don't have an existing one.
         # Allocate a blank object if we have no parent-value to use.
-        if parent_value is None:
-            obj = for_type()
-            self._dependencies[for_type] = obj
-            return obj
+        # We add it to the ctx farthest down the stack, so it can be more visible to others
+        # (this reduces the number of redundant Dependency instances to the minimum).
+        # If `is_thread_sharable` is `False`, the last one is guaranteed to be the thread-root.
+        obj = for_type()
+        last_ctx._dependencies[for_type] = obj
 
-        # Store in self for future reuse.
-        self._cached_parent_dependencies[for_type] = parent_value
-        return parent_value
+        # TODO: I have another TODO in this file about caching these, check that for details.
+        # # Store in self and all other ctx's on the stack for future reuse?
+        # self._cached_parent_dependencies[for_type] = parent_value
+
+        return obj
 
     def resource_chain(
             self, for_type: Type[ResourceTypeVar], create: bool = False
     ) -> Iterable[ResourceTypeVar]:
-        """
-        This is deprecated, renamed to `XContext.dependency_chain`; use `dependency_chain` instead.
+        """ This is deprecated, renamed to `XContext.dependency_chain`; use `dependency_chain` instead.
         """
         return self.dependency_chain(for_type=for_type, create=create)
 
@@ -1004,35 +818,20 @@ class XContext:
                 hierarchy.
         """
         objs_already_seen = set()
+        from xinject.dependency import is_dependency_thread_sharable
+        is_thread_sharable = is_dependency_thread_sharable(for_type)
 
-        for context in self.parent_chain():
-            resource = context.dependency(for_type=for_type, create=create)
-            if not resource:
+        for context in self.ctx_chain(yield_from_other_threads=is_thread_sharable):
+            obj = context.dependency(for_type=for_type, create=create)
+            if not obj:
                 continue
 
-            resource_id = id(resource)
-            if resource_id in objs_already_seen:
+            obj_id = id(obj)
+            if obj_id in objs_already_seen:
                 continue
 
-            objs_already_seen.add(resource_id)
-            yield resource
-
-    def all_dependencies_from_chain(
-            self, *, exclude_app_root: bool = False, exclude_non_thread_sharable: bool = False
-    ) -> dict[Type[ResourceTypeVar], ResourceTypeVar]:
-        deps = {}
-        for ctx in reversed(self.parent_chain()):
-            if ctx is _app_root_context and exclude_app_root:
-                continue
-            deps.update(ctx._dependencies)
-
-        if exclude_non_thread_sharable:
-            from xinject.dependency import is_dependency_thread_sharable
-            for k in list(deps.keys()):
-                if not is_dependency_thread_sharable(k):
-                    deps.pop(k)
-
-        return deps
+            objs_already_seen.add(obj_id)
+            yield obj
 
     def __copy__(self):
         """ Makes a shallow copy of self.
@@ -1045,34 +844,14 @@ class XContext:
             - Activating a `xinject.dependency.Dependency` via `@` or `with`.
 
             Using one of the above with a XContext also makes it 'active'
-            (see XContext._is_active for more internal details, if your interested ).
+            (see XContext.is_active for more internal details, if your interested ).
 
             When a context is made current, it's sort of used as a 'template'.
             That way it can be used over and over again without accumulating
             resourced between runs. It will be 'fresh' each time with whatever
             you added in the original 'template'.
-
-            Root and root-like contexts are treated special when it comes to copying with regard
-            to how their parent values in their copies are treated.
-            See `_TreatAsRootParent` for more details on this aspect.
         """
-        from xinject import Dependency
-        # Use None for parent if we were originally created with a `None` parent.
-        parent = Default
-        if self._parent is _TreatAsRootParent:
-            # When this context is activated, _TreatAsRootParent will be turned into a None
-            # on the object automatically, and properly setup to be a root or root-like context.
-            parent = _TreatAsRootParent
-        elif self._originally_passed_none_for_parent:
-            parent = None
-
-        # Blank context with the same parent configuration
-        new_context = XContext(parent=parent)
-
-        new_context._dependencies = self._dependencies.copy()
-        # Reset context chain cache, if anything was cached in it.
-        new_context._reset_caches()
-        return new_context
+        return self.copy()
 
     def __deepcopy__(self, memo):
         """
@@ -1103,13 +882,18 @@ class XContext:
 
         # return self.__copy__(deepcopy_resources=True, deepcopy_memo=memo)
 
-    def copy(self):
+    def copy(self, name: str | None = None):
         """ Convenience method to easily shallow-copy a XContext, calls `return copy.copy(self)`.
             Used when you activate a XContext via a decorator or `with` statement.
 
             When a XContext is activated, it is copied and then the copy is set to active.
         """
-        return copy(self)
+        # Blank context with the same parent configuration
+        if not name:
+            name = "Copy"
+        new_context = XContext(name=f"{name}Of<{self._name}>")
+        new_context._dependencies = self._dependencies.copy()
+        return new_context
 
     def __enter__(self):
         """
@@ -1130,69 +914,36 @@ class XContext:
             ...     assert XContext.grab() is copied_and_activated_context
             ...     assert XContext.grab() is not some_context
         """
-        with self._lock:
-            new_ctx = self
-            if self._is_active:
-                # We are already 'activated', make shallow copy + sibling...
-                new_ctx = self.copy()
-                new_ctx._sibling = self
-
-            # Check to make sure new_ctx is not currently active, if it is we either need to:
-            #   make a copy of self and activate that instead
-            #   raise an error.
-
-            token = new_ctx._make_current_and_get_reset_token()
-            self._reset_token_stack.append(token)
-            return new_ctx
+        new_ctx = self
+        if self.is_active:
+            # We are already 'activated', make shallow copy + sibling.
+            # This is due to the need to put ourselves into the storage/parent-chain a second time.
+            # To accomplish this, we make a copy of ourselves and set the copies sibling to ourselves.
+            # WHen a context has a sibling, dependencies added to them is also added to the sibling.
+            # This allows the 'appearance' from the users perspective that the context is still the same,
+            # even though we are technically using a second context object.
+            new_ctx = self.copy(name="Sibling")
+            new_ctx._sibling = self
+        _XContextOrderedStore.push(new_ctx)
+        return new_ctx
 
     def __exit__(self, *args, **kwargs):
         # Makes it possible to use a XContext object in a `with XContext():` statement.
-        with self._lock:
-            token = self._reset_token_stack.pop()
+        ctx = _XContextOrderedStore.current()
 
-            current_context = XContext.grab()
+        if not ctx:
+            log.error(f'There was no XContext on top of stack when one was attempting to pop ({self}).')
+            return
+        elif (v := ctx._sibling) and v is self:
+            ctx_to_deactivate = ctx
+        else:
+            if ctx is not self:
+                log.error(f"A XContext ({self}) was exited, and was not current context ({ctx}).")
+            ctx_to_deactivate = self
 
-            if current_context._sibling:
-                assert current_context._sibling is self, (
-                    f"Exiting a sibling ({current_context._sibling}), but sibling was not ({self})"
-                )
-                context_to_deactivate = current_context
-            else:
-                assert current_context is self, (
-                    f"A XContext ({self}) was exited, and was not current context ({current_context})"
-                )
-                context_to_deactivate = self
-
-            assert not context_to_deactivate._reset_token_stack, (
-                f"A XContext ({self}) was exited, and there was still a reset-token on stack."
-            )
-
-        with context_to_deactivate._lock:
-            # Doing this to be extra-cautious, XContext should dynamically look up current
-            # context if it's not active anymore
-            # (ie: outside-of / not in python ContextVar: `_current_context_contextvar`).
-            #
-            # Reset context that is not active anymore back to Default if it had a parent.
-            # if the parent is None, it should remain as None.
-            # A `Default` parent means it looks up parent dynamically each time (to the current one).
-            _current_context_contextvar.reset(token)
-
-            context_to_deactivate._is_active = False
-            context_to_deactivate._reset_caches()
-
-        # TODO: If I still have `children` myself, I need to make a copy of all my stuff
-        #   they don't have and put it in them???
-
-        if v := context_to_deactivate._parent:
-            with v._lock:
-                # Remove self from children, reset parent/caches.
-                context_to_deactivate._parent._children.remove(context_to_deactivate)
-                context_to_deactivate._parent = Default
-
-                assert not context_to_deactivate._children, (
-                    f"XContext ({context_to_deactivate}) still has children after exiting as active "
-                    f"({context_to_deactivate._children})."
-                )
+        result = _XContextOrderedStore.pop(ctx_to_deactivate)
+        if not result:
+            log.error(f"A XContext ({self}) was exited, but it was not in stack.")
 
     def __call__(self, *args, **kwargs):
         """
@@ -1316,137 +1067,246 @@ class XContext:
         functools.update_wrapper(wrapper, _func)
         return wrapper
 
-    # todo: rename this to just 'chain' ?? or context_chain? [it includes 'self' is why].
-    def parent_chain(self, _log_loop_error=True, _include_self=True) -> List["XContext"]:
-        """ A list of self + all parents in priority order.
+    def ctx_chain(self, yield_self: bool = True, yield_from_other_threads: bool = True) -> Iterator[Self]:
+        """ Returns a generator that will yield self, and then every parent relative to us, along
+            with the thread-root and app-root at the appropriate times.
 
-            This is cached the first time we are called if we are currently active
-            since the `XContext.parent` can't be changed after `XContext` creation while active.
+            The goal is to generally return self first, and then the next parent in the stack, etc.;
+            but along the way yielding the special thread-root and app-root at the correct points.
+
+            General Algorthm:
+            - Always yield self first, unless `include_self` is `False`.
+
+            - If self is not active, we return the top of the stack; unless top of stack is from a different thread,
+              we then return thread-root context in that case.
+
+            - Otherwise, we keep returning the next context after us in the stack, until we find context in a different
+              thread and current context is in current thread.  In that case, we return thread-root context.
+
+            - If self is a thread-root context, we scan stack and return the next context that is not in our
+              current thread; and if not found we return app-root context.
+
+            - Once we get to bottom of stack, we check if bottom-stack context is in our current thread.
+              If it is we return thread-root context; otherwise we return app-root context.
+            Args:
+                yield_self: If `True` (default): Include `self` as the first yielded item.
+                    Unless `self` is from a different thread and `yield_from_other_threads` is `False`.
+
+                yield_from_other_threads: If `True` (default): Include XContext's that were created in threads
+                    different from the current thread.  This overrides `yield_self` if `self` was created
+                    in a different thread.
+        """
+        thread_unique_id = _thread_storage.thread_unique_id
+        thread_root_was_yielded = False
+        yielded_self = False
+        is_self_thread_root = self._is_thread_root
+        self_yield_obj = None
+
+        if yield_self:
+            if self._is_app_root and yield_from_other_threads:
+                yield self
+                return
+            elif self._thread_unique_id == thread_unique_id:
+                yielded_self = True
+                yield self
+            elif yield_from_other_threads:
+                yielded_self = True
+                yield self
+
+            if yielded_self and is_self_thread_root:
+                if not yield_from_other_threads:
+                    # If we are the thread-root and we already got yielded, nothing more to do.
+                    # The thread-root is always last if `yield_from_other_threads` is `False`.
+                    return
+                thread_root_was_yielded = True
+
+        if self._is_app_root:
+            return
+
+        if not yield_from_other_threads and is_self_thread_root:
+            return
+
+        if yielded_self:
+            self_yield_obj = self
+
+        storage = _XContextOrderedStore.storage()
+
+        # If we  are thread-root, we need to find the next parent after the thread-root,
+        # and then yield that and everything else, up until the app-root
+        if is_self_thread_root:
+            if thread_unique_id != self._thread_unique_id:
+                log.error(f'Somehow asking for parent of a thread-root ({self}) '
+                          f'from a different thread ({threading.current_thread().name}/{thread_unique_id}); '
+                          f'skipping self.')
+
+            stack_iter = iter(storage.values_reversed)
+            for v in stack_iter:
+                if v._thread_unique_id == thread_unique_id:
+                    continue
+                # Found first ctx in storage stack (ie: reversed values) that is in a different thread:
+                if yield_from_other_threads or v._thread_unique_id == thread_unique_id:
+                    if self_yield_obj is not v:
+                        yield v
+                break
+            else:
+                # Everything in storage is in our own thread,
+                # that means next one after thread-root is the app-root.
+                if yield_from_other_threads and self_yield_obj is not _app_root_context:
+                    yield _app_root_context
+                return
+
+            # Faster to simply continue the iter and finally yield the app root here, since we know exactly
+            # what we need to do and no other logic needs to be checked at this point.
+            for v in stack_iter:
+                if yield_from_other_threads or v._thread_unique_id == thread_unique_id:
+                    if self_yield_obj is not v:
+                        yield v
+
+            if yield_from_other_threads and self_yield_obj is not _app_root_context:
+                yield _app_root_context
+            return
+
+        # We want to use a local-copy of the stack, in case things change in our storage/contextvar while iterating
+        # (I don't really expect it to, but you never know).
+        stack = storage.values
+        start_index = storage.index_for_ctx(self)
+
+        # We are not 'active' in storage, so we check the top of the stack;
+        # since the next parent needs to be in stack or thread-root.
+        if start_index is None:
+            if not stack:
+                # If nothing is in stack, yield thread-root and then app-root; we are done.
+                yield _thread_storage.root_ctx
+                if yield_from_other_threads:
+                    yield _app_root_context
+                # Finished!
+                return
+
+            # If we are not yielding from other threads, always do thread-root last, no mater what.
+            # If stack top is not in our thread, we yield the thread-root and then go though the rest of the stack.
+            if yield_from_other_threads and stack[-1]._thread_unique_id != thread_unique_id:
+                v = _thread_storage.root_ctx
+                if self_yield_obj is not v:
+                    thread_root_was_yielded = True
+                    yield _thread_storage.root_ctx
+
+            # Start next index (ie: index-1) to get the top of the stack.
+            start_index = len(stack)
+        elif start_index <= 0:
+            # We are at bottom of the stack.
+            # Return thread-root and then app-root; and then we are finished.
+            yield _thread_storage.root_ctx
+
+            # Yield app-root if needed.
+            if yield_from_other_threads:
+                yield _app_root_context
+            # Finished!
+            return
+
+        # Otherwise, we get the next parent after us in the stack, and so on and so forth...
+        for i in range(start_index - 1, -1, -1):
+            ctx = stack[i]
+
+            if ctx._thread_unique_id == thread_unique_id and self_yield_obj is not ctx:
+                # Thread is the same as us, so always safe to yield it.
+                yield ctx
+                continue
+
+            # We are from the same thread as the current thread, but next parent is not and self was created in thread;
+            # return thread-root if we `yield_from_other_threads`, otherwise wait until the end.
+            # We always yield thread-root last if `yield_from_other_threads` is `False`.
+            if yield_from_other_threads and not thread_root_was_yielded and self._thread_unique_id == thread_unique_id:
+                v = _thread_storage.root_ctx
+                if self_yield_obj is not v:
+                    thread_root_was_yielded = True
+                    yield _thread_storage.root_ctx
+
+            # Yield current position in stack, then go to next one (via for loop).
+            # We already detected if ctx was in our thread or not at top of loop,
+            # so only yield this if `yield_from_other_threads` is `True`.
+            if yield_from_other_threads and self_yield_obj is not ctx:
+                yield ctx
+
+        # If we are not yielding from other threads, the thread-root is always the last one; we skip app-root.
+        if not yield_from_other_threads:
+            yield _thread_storage.root_ctx
+            return
+
+        # Make sure we yield thread-root if it has not already been.
+        if not thread_root_was_yielded:
+            yield _thread_storage.root_ctx
+
+        # And finally, yield the app-root as the last context.
+        if yield_from_other_threads:
+            yield _app_root_context
+
+    # todo: rename this to just 'chain' ?? or context_chain? [it includes 'self' is why].
+    def parent_chain(self, _include_self=True) -> List["XContext"]:
+        """ A list of self + all parents in priority order.
 
             See `XContext._is_active` internal/private var for a bit more detail on what is
             'active' but suffice to say that active means XContext is currently being used via a
             decorator '@' or via `with` or activating a `xinject.dependency.Dependency` via `@`
             or `with`; has not been exited yet, we are active.
 
-            If we are not current active, we won't cache the list and the parent chain will
-            start with `self` as the first item, and if the parent passed in to us when self
-            was created was left/set at:
-
-            - `xsentinels.default.Default`: Lookup current context via `XContext.current` and
-                that's our next parent
-                (and we grab their parent and so forth and return the full list).
-            - `None`: We don't look for more parents.
+            The chain will start with `self` as the first item, and then proceed with the others
+            that are currently active (see `XContext.is_active`).
         """
-        chain = self._cached_context_chain
-        if chain is not None:
-            return chain
+        return [v for v in self.ctx_chain() if v]
 
-        chain = []
-        already_seen = set()
-        if _include_self:
-            chain.append(self)
-            already_seen.add(self)
+    @property
+    def is_active(self) -> bool:
+        """ This means at some point in the past we were 'activated' via one of these methods:
 
-        # This will resolve Default parent if needed, or give us back out explicit parent;
-        # or a None if we originally got passed a None for our parent when we were created.
-        current_context = self.parent
+            `with` or `@` or activating a `xinject.dependency.Dependency` via `@` or `with`.
 
-        while current_context:
-            if current_context in already_seen:
-                if not _log_loop_error:
-                    break
+            And we are still 'active' (or even the 'XContext.current');
 
-                msg = (
-                    f'Found a context loop while getting the parent_chain ({chain}), '
-                    f'already saw ({current_context}) while in self ({self}).'
-                )
-                print(f'ERROR: FOUND LOOP CHAIN: {msg}')
-                raise Exception(msg)
+            When we are active we can be consulted generically.
+            This means the `self` is part of the parent-chain.
+            See `XContext.ctx_chain`.
+        """
+        if self._is_app_root or self._is_thread_root:
+            return True
+        return _XContextOrderedStore.storage().contains(self)
 
-            already_seen.add(current_context)
-            chain.append(current_context)
-            current_context = current_context.parent
-
-        if self._is_active:
-            # It's safe to cache parent-chain if we are active, our parent won't change
-            # while we are active. See doc-comment on `XContext._is_active` for more details.
-            self._cached_context_chain = chain
-
-        return chain
-
-    def __repr__(self, include_parent=True):
+    def __repr__(self, include_parent=False):
         types_list = list(self._dependencies.keys())
         if types_list and len(types_list) < 3:
             types_list = [t.__name__ for t in types_list]
             types = ';'.join(types_list)
-            types = f'dependency_type={types}'
+            types = f'dep_type={types}'
         else:
-            types = f'dependency_count={len(types_list)}'
+            types = f'dep_count={len(types_list)}'
 
-        parent = self.parent
-        parent_name = parent.name if parent else "None"
+        my_str = f"XContext(name='{self.name}', {types}')"
+        if not include_parent:
+            return my_str
 
-        parent = self._parent
-        _parent_name = parent.name if parent else "None"
+        str_list = [my_str]
+        for v in self.ctx_chain(yield_self=False):
+            str_list.append(v.__repr__(include_parent=False))
+        return f"[{', '.join(str_list)}]"
 
-        str = f"XContext(name='{self.name}', {types}, parent-name='{parent_name}', active={self._is_active}, _parent='{_parent_name}')"
-        if include_parent:
-            for v in self.parent_chain(_log_loop_error=False, _include_self=False):
-                str = f'{str}, {v.__repr__(include_parent=False)}'
-        return str
-
-    def _reset_caches(self):
-        """ Used internally to reset parent-chain, so it will be looked
-            up next time they are asked for.
-        """
-
-        self._cached_context_chain = None
-        self._cached_parent_dependencies.clear()
-
-    def _remove_cached_dependency_and_in_children(self, dependency_type: Type):
-        self._cached_parent_dependencies.pop(dependency_type, None)
-        for child in self._children:
-            child._remove_cached_dependency_and_in_children(dependency_type)
+    def _reset_dependencies(self):
+        self._dependencies = {}
 
     _cached_context_chain = None
-    _cached_parent_dependencies: dict = None
 
-    _is_active = False
-    """ This means at some point in the past we were 'activated' via one of these methods:
+    # _cached_parent_dependencies: dict = None
 
-        `with` or `@` or activating a `xinject.dependency.Dependency` via `@` or `with`.
-
-        And we are still 'active' (or even the 'XContext.current');
-
-        When we are active we have a set parent, and can cache specific things since
-        our parent won't change while we are 'active'.
-
-        This means the `self` is inside `_current_context_contextvar` somewhere and is part of
-        the parent-chain.  See `XContext.parent_chain`.
-    """
-
-    _reset_token_stack: List[contextvars.Token] = None
     _dependencies: Dict[Type[Any], Any] = None
 
-    _is_root_context_for_app = False
+    _is_app_root = False
+    """ If `True`: Context is the root-context for entire app; and lives outside of
+            the `_current_context_contextvar` contextvars, in a special static, module/global.
+    """
 
-    _is_root_context_for_thread: bool = False
+    _is_thread_root: bool = False
     """ If True, this XContext is the root-context for a thread
         (or if only one thread, the only root context).
         This is mostly here for debugging purposes.
     """
-
-    _is_root_like_context: bool = False
-    """ If True, this context was originally created to be a root-like/root context.
-        The REAL thread-root context will have this AND `XContext._is_root_context_for_thread`
-        both set to True.
-    """
-
-    _parent: 'Union[XContext, _TreatAsRootParent, None]' = None
-    _originally_passed_none_for_parent = True
-    """ Used internally to know if None was passed as my parent value originally. """
-
-    _children: Set['XContext'] = None
 
     _sibling: Optional['XContext'] = None
     """
@@ -1480,10 +1340,100 @@ class XContext:
         ...     pass
     """
 
-    _lock: Lock
-    """ Used when modifying the parent/child lists when entering/exiting context managers,
-        to be safe in case we are in another thread.
+    _thread_unique_id: int
+    """ Thread that we were originally created on.
     """
+
+    _thread_name: str
+    """ Name of thread we were orginally created on.
+    """
+
+
+class _XContextOrderedStore:
+    _storage: dict[XContext, None]
+
+    def __init__(self, from_pool: Self | None = None):
+        if from_pool is not None:
+            self._storage = from_pool._storage.copy()
+        else:
+            self._storage = {}
+
+    @classmethod
+    def storage(cls) -> Self | None:
+        value = _current_context_contextvar.get()
+        if value is None:
+            value = _XContextOrderedStore()
+            _current_context_contextvar.set(value)
+        return value
+
+    @classmethod
+    def current(cls) -> XContext | None:
+        return _XContextOrderedStore.storage().last
+
+    @classmethod
+    def push(cls, ctx: XContext):
+        current = _XContextOrderedStore.storage()
+        assert ctx not in current._storage
+        new = current.copy()
+        new._storage[ctx] = None
+        _current_context_contextvar.set(new)
+
+    @classmethod
+    def pop(cls, ctx: XContext) -> XContext | None:
+        current = _XContextOrderedStore.storage()
+        assert ctx in current._storage
+        new = current.copy()
+        result = new._storage.pop(ctx)
+        _current_context_contextvar.set(new)
+        return result
+
+    def copy(self) -> Self:
+        return _XContextOrderedStore(self)
+
+    @cached_property
+    def values(self) -> list[XContext]:
+        return list(self._storage.keys())
+
+    @cached_property
+    def values_reversed(self) -> list[XContext]:
+        return list(reversed(self.values))
+
+    @cached_property
+    def stack(self):
+        return self.values_reversed
+
+    @cached_property
+    def ctx_to_index(self) -> dict[XContext, int]:
+        return {v: i for i, v in enumerate(self._storage.keys())}
+
+    @cached_property
+    def last(self) -> XContext | None:
+        values = self.values
+        return values[-1] if values else None
+
+    @cached_property
+    def top(self):
+        return self.last
+
+    @cached_property
+    def first(self) -> XContext | None:
+        values = self.values
+        return values[0] if values else None
+
+    def contains(self, ctx) -> bool:
+        return ctx in self._storage
+
+    def index_for_ctx(self, ctx) -> int | None:
+        return self.ctx_to_index.get(ctx, None)
+
+    def __getitem__(self, index) -> XContext:
+        return self.values[index]
+
+    def __len__(self) -> int:
+        return len(self._storage)
+
+    def __contains__(self, item) -> bool:
+        return self.contains(item)
 
 
 def _setup_blank_app_and_thread_root_contexts_globals(keep_global_context: bool = False):
@@ -1513,7 +1463,7 @@ def _setup_blank_app_and_thread_root_contexts_globals(keep_global_context: bool 
 
     if not keep_global_context:
         _app_root_context = XContext(parent=_TreatAsRootParent, name='AppRoot')
-        _app_root_context._make_current_and_get_reset_token(is_app_root_context=True)
+        _app_root_context._is_app_root = True
     else:
         from xinject.dependency import is_dependency_removed_between_unittests, Dependency
         # Remove any dependencies from/in global context that configure themselves as wanting that.
@@ -1532,10 +1482,35 @@ def _setup_blank_app_and_thread_root_contexts_globals(keep_global_context: bool 
         default=None
     )
 
+    with _all_thread_storage_ctxs__lock:
+        for ctx in _all_thread_storage_ctxs:
+            ctx._reset_dependencies()
 
-# Setup initial global XContext objects/state/containers:
-_setup_blank_app_and_thread_root_contexts_globals(False)
+
+class _ThreadStorage(threading.local):
+    thread_unique_id: int
+    root_ctx: XContext
+
+    def __init__(self, first: bool = False):
+        super().__init__()
+        thread_unique_id = _thread_counter.new_value()
+        self.thread_unique_id = thread_unique_id
+        ctx = XContext(name=f'ThreadRoot', _thread_unique_id=thread_unique_id)
+        ctx._is_thread_root = True
+        self.root_ctx = ctx
+        with _all_thread_storage_ctxs__lock:
+            _all_thread_storage_ctxs.add(ctx)
+
+
+_all_thread_storage_ctxs__lock = threading.Lock()
+_all_thread_storage_ctxs: WeakSet[XContext] = WeakSet()
+_ctx_counter = _private.AtomicCounter()
+_thread_counter = _private.AtomicCounter()
 
 # These are globals that should be here at this point:
 _app_root_context: XContext
-_current_context_contextvar: contextvars.ContextVar[Optional[XContext]]
+_thread_storage = _ThreadStorage(first=True)
+_current_context_contextvar: contextvars.ContextVar[_XContextOrderedStore | None]
+
+# Setup initial global XContext objects/state/containers:
+_setup_blank_app_and_thread_root_contexts_globals(False)

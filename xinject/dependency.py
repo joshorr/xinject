@@ -162,18 +162,15 @@ else:
 
 
 def is_dependency_thread_sharable(dependency: 'Type[Dependency] | Dependency') -> bool:
-    # noinspection PyProtectedMember
-    return dependency._dependency__meta.get('thread_sharable', True)
+    return getattr(dependency, '_dependency__meta', {}).get('thread_sharable', True)
 
 
 def is_dependency_removed_between_unittests(dependency: 'Type[Dependency] | Dependency') -> bool:
-    # noinspection PyProtectedMember
-    return dependency._dependency__meta.get('remove_between_unittests', False)
+    return getattr(dependency, '_dependency__meta', {}).get('remove_between_unittests', False)
 
 
 def attributes_to_skip_while_copying(dependency: 'Type[Dependency] | Dependency') -> Set[str]:
-    # noinspection PyProtectedMember
-    return dependency._dependency__meta.get('attributes_to_skip_while_copying', set())
+    return getattr(dependency, '_dependency__meta', {}).get('attributes_to_skip_while_copying', set())
 
 
 class Dependency:
@@ -600,7 +597,7 @@ class Dependency:
             self._context_manager_stack = []
 
         # We make a new XContext object, and delegate context-management duties to it.
-        context = XContext(dependencies=self)
+        context = XContext(dependencies=self, name=f"with:{self.__class__.__name__}")
         self._context_manager_stack.append(context)
         context.__enter__()
         return self
