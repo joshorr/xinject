@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.9.0](https://github.com/joshorr/xinject/compare/v1.8.0...v1.9.0) (2026-03-18)
+
+
+### Features
+
+* support async/yield inside a `with` that used a Dependency/XContext. ([87f4175](https://github.com/joshorr/xinject/commit/87f4175af6d8d0a937fdf73428a88589b90ca7cb))
+
+
+### Bug Fixes
+
+* issue with thread-root position when in subthread + PR feedback. ([85241e9](https://github.com/joshorr/xinject/commit/85241e9e5c8dbabb6f7d8575522593c738e3d54c))
+
 ## [1.8.0](https://github.com/joshorr/xinject/compare/v1.7.0...v1.8.0) (2026-03-09)
 
 
