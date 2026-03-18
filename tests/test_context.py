@@ -71,6 +71,7 @@ def test_context_and_with():
 
     def verify_current_context_is_copy():
         copied_context: XContext = XContext.grab()
+
         # ensure they are not the same object (ie: it got copied), and the parent is correct.
         assert context_1 is not copied_context
         assert copied_context.parent is context_1
@@ -195,7 +196,7 @@ def test_each_unit_test_starts_with_a_single_parentless_root_like_context():
     assert len(unit_test_root_context._dependencies) == 0
 
     # Ensure that when we use the root-like blank unit test context inside a `with` statement,
-    # we have a new context with it's parent set at our root-like blank unit test context.
+    # we have a new context with its parent set at our root-like blank unit test context.
     with unit_test_root_context as new_context:
         assert unit_test_root_context is not new_context
         assert new_context.parent is unit_test_root_context

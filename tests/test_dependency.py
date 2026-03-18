@@ -70,19 +70,31 @@ def test_shared_threaded_resource():
 
     thread_out_sharable = None
     thread_out_nonsharable = None
+    thread_e = None
 
     # This is the root-func for a separate thread.
     def thread_func():
-        # Want to write-to these in outer scope.
-        nonlocal thread_out_sharable
-        nonlocal thread_out_nonsharable
+        nonlocal thread_e
+        try:
+            # Want to write-to these in outer scope.
+            nonlocal thread_out_sharable
+            nonlocal thread_out_nonsharable
 
-        # This should produce an '3', since dependency can be shared between threads.
-        thread_out_sharable = ThreadSharableDependency.grab().hello
+            # This should produce an '3', since dependency can be shared between threads.
+            thread_out_sharable = ThreadSharableDependency.grab().hello
 
-        # This should produce an 'a', since the dependency is NOT shared between threads;
-        # the setting of it to 'b' above is in another thread and is NOT shared.
-        thread_out_nonsharable = NonThreadSharableDependency.grab().hello2
+            # This should produce an 'a', since the dependency is NOT shared between threads;
+            # the setting of it to 'b' above is in another thread and is NOT shared.
+            thread_out_nonsharable = NonThreadSharableDependency.grab().hello2
+            with NonThreadSharableDependency() as obj:
+                assert NonThreadSharableDependency.grab() is obj
+                assert XContext.grab().parent.parent.parent is None
+                assert XContext.grab().parent.parent._is_app_root
+                assert XContext.grab().parent._is_thread_root
+                assert not XContext.grab()._is_thread_root
+                assert not XContext.grab()._is_app_root
+        except Exception as e:
+            thread_e = e
 
     import threading
 
@@ -98,6 +110,8 @@ def test_shared_threaded_resource():
 
     # Wait for thread to finish
     other_thread.join()
+
+    assert thread_e is None
 
     # Check to see if the thread safe/unsafe dependencies worked correctly.
     assert thread_out_sharable == "3"

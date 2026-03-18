@@ -7,3 +7,4 @@ exposing them directly as part of a modules public interface.
 """
 
 from .classproperty import classproperty
+from .atomic_counter import AtomicCounter
