@@ -306,15 +306,11 @@ with statement.
 
 """
 import contextvars
-import itertools
 import functools
 import threading
-from _weakrefset import WeakSet
+from weakref import WeakSet
 from functools import cached_property
-from threading import Lock
 from typing import TypeVar, Type, Dict, List, Optional, Union, Any, Iterable, Set, Self, Iterator
-from copy import copy
-from uuid import UUID
 
 from xsentinels.default import Default, DefaultType
 from xsentinels.singleton import Singleton
@@ -399,6 +395,10 @@ class XContext:
         # If there is nothing in the stack, return thread-root.
         if ctx is None:
             return _thread_storage.root_ctx
+
+        if ctx._thread_unique_id != _thread_storage.thread_unique_id:
+            return _thread_storage.root_ctx
+
         return ctx
 
     @classmethod
@@ -1100,7 +1100,6 @@ class XContext:
         thread_root_was_yielded = False
         yielded_self = False
         is_self_thread_root = self._is_thread_root
-        self_yield_obj = None
 
         if yield_self:
             if self._is_app_root and yield_from_other_threads:
@@ -1126,9 +1125,6 @@ class XContext:
         if not yield_from_other_threads and is_self_thread_root:
             return
 
-        if yielded_self:
-            self_yield_obj = self
-
         storage = _XContextOrderedStore.storage()
 
         # If we  are thread-root, we need to find the next parent after the thread-root,
@@ -1143,15 +1139,15 @@ class XContext:
             for v in stack_iter:
                 if v._thread_unique_id == thread_unique_id:
                     continue
+
                 # Found first ctx in storage stack (ie: reversed values) that is in a different thread:
-                if yield_from_other_threads or v._thread_unique_id == thread_unique_id:
-                    if self_yield_obj is not v:
-                        yield v
+                if yield_from_other_threads and self is not v:
+                    yield v
                 break
             else:
                 # Everything in storage is in our own thread,
                 # that means next one after thread-root is the app-root.
-                if yield_from_other_threads and self_yield_obj is not _app_root_context:
+                if yield_from_other_threads and self is not _app_root_context:
                     yield _app_root_context
                 return
 
@@ -1159,10 +1155,10 @@ class XContext:
             # what we need to do and no other logic needs to be checked at this point.
             for v in stack_iter:
                 if yield_from_other_threads or v._thread_unique_id == thread_unique_id:
-                    if self_yield_obj is not v:
+                    if self is not v:
                         yield v
 
-            if yield_from_other_threads and self_yield_obj is not _app_root_context:
+            if yield_from_other_threads and self is not _app_root_context:
                 yield _app_root_context
             return
 
@@ -1186,7 +1182,7 @@ class XContext:
             # If stack top is not in our thread, we yield the thread-root and then go though the rest of the stack.
             if yield_from_other_threads and stack[-1]._thread_unique_id != thread_unique_id:
                 v = _thread_storage.root_ctx
-                if self_yield_obj is not v:
+                if self is not v:
                     thread_root_was_yielded = True
                     yield _thread_storage.root_ctx
 
@@ -1194,10 +1190,13 @@ class XContext:
             start_index = len(stack)
         elif start_index <= 0:
             # We are at bottom of the stack.
-            # Return thread-root and then app-root; and then we are finished.
-            yield _thread_storage.root_ctx
+            # Return thread-root IF the bottom of the stack is in the same thread as us.
+            # (if it's in a different thread, thread-root should have already
+            #  been yielded earlier at some point in the past).
+            if self._thread_unique_id == thread_unique_id:
+                yield _thread_storage.root_ctx
 
-            # Yield app-root if needed.
+            # #hen app-root; and then we are finished.
             if yield_from_other_threads:
                 yield _app_root_context
             # Finished!
@@ -1207,7 +1206,7 @@ class XContext:
         for i in range(start_index - 1, -1, -1):
             ctx = stack[i]
 
-            if ctx._thread_unique_id == thread_unique_id and self_yield_obj is not ctx:
+            if ctx._thread_unique_id == thread_unique_id and self is not ctx:
                 # Thread is the same as us, so always safe to yield it.
                 yield ctx
                 continue
@@ -1217,14 +1216,14 @@ class XContext:
             # We always yield thread-root last if `yield_from_other_threads` is `False`.
             if yield_from_other_threads and not thread_root_was_yielded and self._thread_unique_id == thread_unique_id:
                 v = _thread_storage.root_ctx
-                if self_yield_obj is not v:
+                if self is not v:
                     thread_root_was_yielded = True
                     yield _thread_storage.root_ctx
 
             # Yield current position in stack, then go to next one (via for loop).
             # We already detected if ctx was in our thread or not at top of loop,
             # so only yield this if `yield_from_other_threads` is `True`.
-            if yield_from_other_threads and self_yield_obj is not ctx:
+            if yield_from_other_threads and self is not ctx:
                 yield ctx
 
         # If we are not yielding from other threads, the thread-root is always the last one; we skip app-root.
@@ -1350,7 +1349,7 @@ class XContext:
 
 
 class _XContextOrderedStore:
-    _storage: dict[XContext, None]
+    _storage: dict[XContext, list[XContext] | None]
 
     def __init__(self, from_pool: Self | None = None):
         if from_pool is not None:
@@ -1363,7 +1362,7 @@ class _XContextOrderedStore:
         value = _current_context_contextvar.get()
         if value is None:
             value = _XContextOrderedStore()
-            _current_context_contextvar.set(value)
+            value.set_as_current_storage()
         return value
 
     @classmethod
@@ -1371,12 +1370,24 @@ class _XContextOrderedStore:
         return _XContextOrderedStore.storage().last
 
     @classmethod
-    def push(cls, ctx: XContext):
+    def push(cls, ctx: XContext, from_sibling_ctx: XContext | None = None):
         current = _XContextOrderedStore.storage()
         assert ctx not in current._storage
         new = current.copy()
-        new._storage[ctx] = None
-        _current_context_contextvar.set(new)
+        storage = new._storage
+        storage[ctx] = None
+        if from_sibling_ctx and from_sibling_ctx in storage:
+            to_siblings = storage.get(from_sibling_ctx)
+
+            # Copy-on-write immutable list logic:
+            if to_siblings is None:
+                to_siblings = []
+            else:
+                to_siblings = to_siblings.copy()
+
+            to_siblings.append(ctx)
+            storage[ctx] = to_siblings
+        new.set_as_current_storage()
 
     @classmethod
     def pop(cls, ctx: XContext) -> XContext | None:
@@ -1384,8 +1395,11 @@ class _XContextOrderedStore:
         assert ctx in current._storage
         new = current.copy()
         result = new._storage.pop(ctx)
-        _current_context_contextvar.set(new)
+        new.set_as_current_storage()
         return result
+
+    def set_as_current_storage(self):
+        _current_context_contextvar.set(self)
 
     def copy(self) -> Self:
         return _XContextOrderedStore(self)
@@ -1514,3 +1528,11 @@ _current_context_contextvar: contextvars.ContextVar[_XContextOrderedStore | None
 
 # Setup initial global XContext objects/state/containers:
 _setup_blank_app_and_thread_root_contexts_globals(False)
+
+
+def copy_full_stack_state() -> Any:
+    return _XContextOrderedStore.storage()
+
+
+def restore_with_full_stack_state(stack_state: Any):
+    stack_state.set_as_current_storage()
