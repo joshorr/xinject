@@ -914,7 +914,6 @@ class XContext:
             ...     assert XContext.grab() is copied_and_activated_context
             ...     assert XContext.grab() is not some_context
         """
-        new_ctx = self
         if self.is_active:
             # We are already 'activated', make shallow copy + sibling.
             # This is due to the need to put ourselves into the storage/parent-chain a second time.
@@ -924,24 +923,14 @@ class XContext:
             # even though we are technically using a second context object.
             new_ctx = self.copy(name="Sibling")
             new_ctx._sibling = self
-        _XContextOrderedStore.push(new_ctx)
-        return new_ctx
+            _XContextOrderedStore.push(new_ctx, self)
+            return new_ctx
+
+        _XContextOrderedStore.push(self)
+        return self
 
     def __exit__(self, *args, **kwargs):
-        # Makes it possible to use a XContext object in a `with XContext():` statement.
-        ctx = _XContextOrderedStore.current()
-
-        if not ctx:
-            log.error(f'There was no XContext on top of stack when one was attempting to pop ({self}).')
-            return
-        elif (v := ctx._sibling) and v is self:
-            ctx_to_deactivate = ctx
-        else:
-            if ctx is not self:
-                log.error(f"A XContext ({self}) was exited, and was not current context ({ctx}).")
-            ctx_to_deactivate = self
-
-        result = _XContextOrderedStore.pop(ctx_to_deactivate)
+        result = _XContextOrderedStore.pop(self)
         if not result:
             log.error(f"A XContext ({self}) was exited, but it was not in stack.")
 
@@ -1372,14 +1361,17 @@ class _XContextOrderedStore:
     @classmethod
     def push(cls, ctx: XContext, from_sibling_ctx: XContext | None = None):
         current = _XContextOrderedStore.storage()
-        assert ctx not in current._storage
+        if ctx in current._storage:
+            log.error(f'Somehow ({ctx}) was already in internal storage stack when a request to push it came in, '
+                      f'stack ({list(current._storage.keys())})')
+            return
+
         new = current.copy()
         storage = new._storage
         storage[ctx] = None
         if from_sibling_ctx and from_sibling_ctx in storage:
-            to_siblings = storage.get(from_sibling_ctx)
-
             # Copy-on-write immutable list logic:
+            to_siblings = storage[from_sibling_ctx]
             if to_siblings is None:
                 to_siblings = []
             else:
@@ -1387,14 +1379,48 @@ class _XContextOrderedStore:
 
             to_siblings.append(ctx)
             storage[ctx] = to_siblings
+
         new.set_as_current_storage()
 
     @classmethod
     def pop(cls, ctx: XContext) -> XContext | None:
         current = _XContextOrderedStore.storage()
-        assert ctx in current._storage
+        if ctx not in current._storage:
+            log.error(f'Somehow ({ctx}) was not in internal storage stack when a request to pop it came in, '
+                      f'stack ({list(current._storage.keys())})')
+            return None
+
+        top_ctx = current.last
         new = current.copy()
-        result = new._storage.pop(ctx)
+        storage = new._storage
+        siblings = storage[ctx]
+        result = None
+
+        if ctx is not top_ctx and siblings:
+            siblings_indexes_to_cleanup = []
+            index_to_use = len(siblings) - 1
+            if siblings[index_to_use] is not top_ctx:
+                try:
+                    index_to_use = siblings.index(top_ctx)
+                except ValueError:
+                    for i, v in reversed(list(enumerate(siblings))):
+                        if v in storage:
+                            index_to_use = i
+                            break
+                    else:
+                        index_to_use = None
+
+            if index_to_use is not None:
+                siblings = siblings.copy()
+                sibling_to_pop = siblings.pop(index_to_use)
+                storage[ctx] = siblings if siblings else None
+                storage.pop(sibling_to_pop)
+                result = sibling_to_pop
+
+        if result is None:
+            result = storage.pop(ctx, Default)
+            result = ctx if result is not Default else None
+
         new.set_as_current_storage()
         return result
 
