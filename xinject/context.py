@@ -914,6 +914,16 @@ class XContext:
             ...     assert XContext.grab() is copied_and_activated_context
             ...     assert XContext.grab() is not some_context
         """
+        if self._is_app_root:
+            raise Exception(
+                f"You can't use the an ({self}) that is the app-root as a context manager via the `with` statement."
+            )
+
+        if self._is_app_root:
+            raise Exception(
+                f"You can't use the an ({self}) that is a thread-root as a context manager via the `with` statement."
+            )
+
         if self.is_active:
             # We are already 'activated', make shallow copy + sibling.
             # This is due to the need to put ourselves into the storage/parent-chain a second time.
