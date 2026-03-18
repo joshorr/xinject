@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.9.1](https://github.com/joshorr/xinject/compare/v1.9.0...v1.9.1) (2026-03-18)
+
+
+### Bug Fixes
+
+* ensure the app/thread root contexts can't be used as a context-manager via a `with`. ([b3d401d](https://github.com/joshorr/xinject/commit/b3d401d733908917e33dbde92331b6b095d9440c))
+* Keep track of sibling info for stack/pop management, directly into storage. ([2ad3e34](https://github.com/joshorr/xinject/commit/2ad3e340fd5823547f5eb5c53153cbf6006445e7))
+
 ## [1.9.0](https://github.com/joshorr/xinject/compare/v1.8.0...v1.9.0) (2026-03-18)
 
 
