@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.0](https://github.com/joshorr/xinject/compare/v1.9.1...v1.10.0) (2026-03-31)
+
+
+### Features
+
+* add ability to easily clear/reset dependencies in the current thread's thread-root storage context. ([46b6b10](https://github.com/joshorr/xinject/commit/46b6b105833b7c6c3b9561e77101ef63b67107e5))
+
 ## [1.9.1](https://github.com/joshorr/xinject/compare/v1.9.0...v1.9.1) (2026-03-18)
 
 
