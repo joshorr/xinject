@@ -1572,3 +1572,9 @@ def copy_full_stack_state() -> Any:
 
 def restore_with_full_stack_state(stack_state: Any):
     stack_state.set_as_current_storage()
+
+
+def reset_dependencies_in_current_thread_root() -> None:
+    """ Clears all dependencies in the current thread's root context.
+    """
+    _thread_storage.root_ctx._reset_dependencies()
