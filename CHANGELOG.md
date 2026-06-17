@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.1](https://github.com/joshorr/xinject/compare/v1.10.0...v1.10.1) (2026-06-17)
+
+
+### Bug Fixes
+
+* pytest 9 does not allow marks on fixtures. ([e911ef8](https://github.com/joshorr/xinject/commit/e911ef88ac870ab6cbeb2de08d39f61f8473291a))
+
 ## [1.10.0](https://github.com/joshorr/xinject/compare/v1.9.1...v1.10.0) (2026-03-31)
 
 
