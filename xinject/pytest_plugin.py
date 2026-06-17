@@ -21,9 +21,9 @@ Auto-loaded common fixtures for helping with unit-testing.
 """
 import pytest
 
-
+# TODO: If this has issues in the future around running after other fixtures,
+#   then try using `@pytest.hookimpl(tryfirst=True)` and reordering the fixture run list.
 @pytest.fixture(autouse=True)
-@pytest.mark.order(-1300)
 def xinject_test_context():
     """
     Will blank-out the app and root contexts by allocating new containers
