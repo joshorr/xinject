@@ -159,7 +159,7 @@ def test_deepcopy_context():
 
 
 @dataclasses.dataclass
-class ATestDependency(Dependency):
+class ATestDependency(Dependency, remove_between_unittests=False):
     my_name: str = 'hello!'
 
 

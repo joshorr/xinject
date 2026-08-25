@@ -1,11 +1,11 @@
 from xinject import Dependency
 
 
-class GlobalDep1(Dependency, remove_between_unittests=True):
+class GlobalDep1(Dependency):
     value: str = 'default1'
 
 
-class GlobalDep2(Dependency):
+class GlobalDep2(Dependency, remove_between_unittests=False):
     value: str = 'default2'
 
 
