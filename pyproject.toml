@@ -1,48 +1,62 @@
-[tool.poetry]
+[project]
 name = "xinject"
 version = "1.10.1"
 description = "Lazy dependency injection."
-authors = ["Josh Orr <josh@orr.blue>"]
-packages = [{include = "xinject"}]
+authors = [{ name = "Josh Orr", email = "josh@orr.blue" }]
+requires-python = ">=3.14,<4"
 readme = "README.md"
-repository = "https://github.com/xyngular/py-xinject"
-keywords = ["dependency", "injection", "lazy", "resource"]
+keywords = [
+    "dependency",
+    "injection",
+    "lazy",
+    "resource",
+]
 classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
-    "License :: OSI Approved :: The Unlicense (Unlicense)"
+    "License :: OSI Approved :: The Unlicense (Unlicense)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = ["xsentinels>=1.2.0,<2"]
+
+[project.urls]
+Repository = "https://github.com/xyngular/py-xinject"
+
+[project.entry-points.pytest11]
+xinject_pytest_plugin = "xinject.pytest_plugin"
+
+[dependency-groups]
+dev = [
+    "mkdocs-git-revision-date-plugin>=0.3.2,<0.4",
+    "mkdocs>=1.4.0,<2",
+    "mike>=2,<3",
+    "pytest-pycodestyle>=2.3.0,<3",
+    "pytest>=9,<10",
+    "pdoc3>=0,<1",
+    "mkdocs-material>=9,<10",
+    "tomlkit>=0,<1",
 ]
 
+[tool.uv]
+default-groups = "all"
 
-[tool.poetry.dependencies]
-python = "^3.12"
-xsentinels = "^1.2.0"
+[tool.uv.build-backend]
+module-name = ["xinject"]
+module-root = ""
 
-
-[tool.poetry.group.dev.dependencies]
-mkdocs-git-revision-date-plugin = "^0.3.2"
-mkdocs = "^1.4.0"
-mike = "^2"
-pytest-pycodestyle = "^2.3.0"
-pytest = "^9"
-pdoc3 = "^0"
-mkdocs-material = "^9"
-tomlkit = "^0"
+[build-system]
+requires = ["uv_build>=0.11.23,<0.12.0"]
+build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 minversion = "6.0"
 addopts = "--verbose --pycodestyle"
 testpaths = ["tests", "xinject"]
 
-[build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
-
 [tool.custom.xpublish]
 extra-module-docs = ['xsentinels']
-
-[tool.poetry.plugins]
-# Pytest plugin to support automatic clearing of all current dependency dependencies between each test.
-pytest11 = {xinject_pytest_plugin = "xinject.pytest_plugin"}
 
 [tool.black]
 line-length = 119
