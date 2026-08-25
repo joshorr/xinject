@@ -166,7 +166,7 @@ def is_dependency_thread_sharable(dependency: 'Type[Dependency] | Dependency') -
 
 
 def is_dependency_removed_between_unittests(dependency: 'Type[Dependency] | Dependency') -> bool:
-    return getattr(dependency, '_dependency__meta', {}).get('remove_between_unittests', False)
+    return getattr(dependency, '_dependency__meta', {}).get('remove_between_unittests', True)
 
 
 def attributes_to_skip_while_copying(dependency: 'Type[Dependency] | Dependency') -> Set[str]:
