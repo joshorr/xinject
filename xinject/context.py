@@ -310,7 +310,7 @@ import functools
 import threading
 from weakref import WeakSet
 from functools import cached_property
-from typing import TypeVar, Type, Dict, List, Optional, Union, Any, Iterable, Set, Self, Iterator
+from typing import TypeVar, Type, Dict, List, Optional, Union, Any, Iterable, Set, Self, Iterator, Tuple
 
 from xsentinels.default import Default, DefaultType
 from xsentinels.singleton import Singleton
@@ -640,6 +640,25 @@ class XContext:
             self._sibling.add(dependency, for_type=for_type)
         return self
 
+    def _find_dependency_in_chain(
+            self, for_type: Type, *, yield_from_other_threads: bool
+    ) -> Tuple[Any, 'XContext | None']:
+        """
+        Walks the context-chain looking for an existing dependency mapped for `for_type`.
+
+        Returns a `(dependency, last_context)` tuple. `dependency` is `None` when nothing in the
+        chain has one. `last_context` is the farthest context down the chain, ie: where a new
+        dependency should be created so it's visible to as many others as possible.
+        """
+        last_ctx = None
+        for ctx in self.ctx_chain(yield_from_other_threads=yield_from_other_threads):
+            last_ctx = ctx
+            obj = ctx._dependencies.get(for_type, None)
+            if obj is not None:
+                return obj, last_ctx
+
+        return None, last_ctx
+
     def dependency(
             self, for_type: Type[ResourceTypeVar], *, create: bool = True
     ) -> ResourceTypeVar:
@@ -715,6 +734,20 @@ class XContext:
         class-method on the `for_type` class that would accept these extra parameters and then
         check the current Context and allocate or return the existing context resource as needed.
 
+        ## Thread Safety
+
+        Lazily creating a dependency is guarded by a global re-entrant lock, so two threads asking
+        for the same dependency at the same moment can't each end up with their own instance;
+        one creates it, the other gets handed that same object.
+
+        Looking up a dependency that already exists takes no lock at all, so the common case stays
+        cheap; the lock is only taken on the path that would construct something.
+
+        The dependency's `__init__` runs while that lock is held, which is fine for the normal case
+        of an `__init__` asking for other dependencies (the lock is re-entrant). Worth knowing if
+        an `__init__` does something slow, since it will hold up other threads that are lazily
+        creating some unrelated dependency at that moment.
+
         Args:
             for_type (Type[ResourceTypeVar]): The type of resource you need, and instance of
                 this type will be returned.
@@ -772,33 +805,47 @@ class XContext:
             # and there are no more parents; so we always return `None` in this case.
             return None
 
-        last_ctx = None
-        for ctx in self.ctx_chain(yield_from_other_threads=is_thread_sharable):
-            last_ctx = ctx
-            obj = ctx._dependencies.get(for_type, None)
-            if obj is not None:
-                # TODO: I have another TODO in this file about caching these, check that for details.
-                # # Store in self (and all other ctx's up to this point) for future reuse?
-                # self._cached_parent_dependencies[for_type] = parent_value
-                return obj
+        # Fast path, no lock taken: we're only reading, and individual dict reads are atomic.
+        # Worst case we miss a dependency another thread is creating right now, and then find it
+        # in the re-check under the lock below.
+        # TODO: I have another TODO in this file about caching these, check that for details.
+        # # Store in self (and all other ctx's up to this point) for future reuse?
+        # self._cached_parent_dependencies[for_type] = parent_value
+        obj, last_ctx = self._find_dependency_in_chain(
+            for_type, yield_from_other_threads=is_thread_sharable
+        )
+        if obj is not None:
+            return obj
 
         # If we can't create the dependency, we simply return `None`; nothing more to do.
         if not create:
             return None
 
-        # We next create dependency if we don't have an existing one.
-        # Allocate a blank object if we have no parent-value to use;
-        # `create_type` is normally `for_type`, unless another Dependency subclass claimed
-        # `for_type` via its `lazily_create_for` class argument.
-        # We add it to the ctx farthest down the stack, so it can be more visible to others
-        # (this reduces the number of redundant Dependency instances to the minimum).
-        # If `is_thread_sharable` is `False`, the last one is guaranteed to be the thread-root.
-        obj = create_type()
-        dependencies = last_ctx._dependencies
-        dependencies[for_type] = obj
-        dependencies[create_type] = obj
-        for injected_type in inject_for_types(obj):
-            dependencies[injected_type] = obj
+        with _lazily_create_dependency__lock:
+            # Look again now that we hold the lock. Another thread may have created it while we
+            # waited, and we have to hand back their object instead of making a second one.
+            obj, last_ctx = self._find_dependency_in_chain(
+                for_type, yield_from_other_threads=is_thread_sharable
+            )
+            if obj is not None:
+                return obj
+
+            # We next create dependency if we don't have an existing one.
+            # Allocate a blank object if we have no parent-value to use;
+            # `create_type` is normally `for_type`, unless another Dependency subclass claimed
+            # `for_type` via its `lazily_create_for` class argument.
+            # We add it to the ctx farthest down the stack, so it can be more visible to others
+            # (this reduces the number of redundant Dependency instances to the minimum).
+            # If `is_thread_sharable` is `False`, the last one is guaranteed to be the thread-root.
+            #
+            # The dependency is constructed while holding the lock, which is why it's an `RLock`;
+            # a `__init__` that asks for some other dependency re-enters us on this same thread.
+            obj = create_type()
+            dependencies = last_ctx._dependencies
+            dependencies[for_type] = obj
+            dependencies[create_type] = obj
+            for injected_type in inject_for_types(obj):
+                dependencies[injected_type] = obj
 
         # TODO: I have another TODO in this file about caching these, check that for details.
         # # Store in self and all other ctx's on the stack for future reuse?
@@ -1578,6 +1625,19 @@ class _ThreadStorage(threading.local):
         with _all_thread_storage_ctxs__lock:
             _all_thread_storage_ctxs.add(ctx)
 
+
+_lazily_create_dependency__lock = threading.RLock()
+""" Guards lazily creating a dependency, so two threads asking for the same one at the same time
+    can't each construct their own; see `XContext.dependency`.
+
+    Must stay an `RLock`: a `Dependency.__init__` is run while this is held, and it's normal for
+    one to ask for some other dependency, which re-enters `XContext.dependency` on this same
+    thread. A plain `Lock` would deadlock on that.
+
+    A single global lock (rather than one per dependency-type) is what makes that re-entrancy
+    safe; with per-type locks, two threads creating dependencies that ask for each other could
+    deadlock against each other.
+"""
 
 _all_thread_storage_ctxs__lock = threading.Lock()
 _all_thread_storage_ctxs: WeakSet[XContext] = WeakSet()
