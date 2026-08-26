@@ -821,6 +821,8 @@ class XContext:
         if not create:
             return None
 
+        # TODO: Can probably optimize this in the future by doing a ocker per-dependecy type,
+        #   for now keeping it simple.
         with _lazily_create_dependency__lock:
             # Look again now that we hold the lock. Another thread may have created it while we
             # waited, and we have to hand back their object instead of making a second one.
