@@ -608,12 +608,6 @@ class XContext:
         Args:
             dependency (Any): Object to add as a dependency, it's type will be mapped to it.
 
-            skip_if_present (bool): If False [default], we raise an exception if dependency
-                of that type is already in context/self.
-
-                If True, we don't do anything if dependency of that type is already in
-                context/self.
-
             for_type: You can force a particular mapping by using this option.
                 By default, the `for_type` is set to the type of the passed in dependency
                 [via `type(dependency)`].
