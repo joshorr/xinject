@@ -1,6 +1,6 @@
 [project]
 name = "xinject"
-version = "1.10.1"
+version = "1.11.0"
 description = "Lazy dependency injection."
 authors = [{ name = "Josh Orr", email = "josh@orr.blue" }]
 requires-python = ">=3.14,<4"

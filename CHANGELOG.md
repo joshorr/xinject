@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.11.0](https://github.com/joshorr/xinject/compare/v1.10.1...v1.11.0) (2026-08-26)
+
+
+### Features
+
+* be careful to not lazily create the same dependency twice due to race condition. ([0e7442e](https://github.com/joshorr/xinject/commit/0e7442e10f030be7d3ab46d278062068264847bb))
+* default removing dependencies between unit test runs, like used to happen before March. ([f5da8ba](https://github.com/joshorr/xinject/commit/f5da8bae9fcc4d996f39c457a3ae40b3faa222a1))
+* easily have subclasses optionally inject in place of other types. ([2c2b471](https://github.com/joshorr/xinject/commit/2c2b47109e5ac99af147447cf6bfb6bab119c326))
+
 ## [1.10.1](https://github.com/joshorr/xinject/compare/v1.10.0...v1.10.1) (2026-06-17)
 
 
