@@ -740,13 +740,7 @@ class XContext:
         for the same dependency at the same moment can't each end up with their own instance;
         one creates it, the other gets handed that same object.
 
-        Looking up a dependency that already exists takes no lock at all, so the common case stays
-        cheap; the lock is only taken on the path that would construct something.
-
-        The dependency's `__init__` runs while that lock is held, which is fine for the normal case
-        of an `__init__` asking for other dependencies (the lock is re-entrant). Worth knowing if
-        an `__init__` does something slow, since it will hold up other threads that are lazily
-        creating some unrelated dependency at that moment.
+        Looking up a dependency that already exists takes no lock at all, more optimial that way.
 
         Args:
             for_type (Type[ResourceTypeVar]): The type of resource you need, and instance of
