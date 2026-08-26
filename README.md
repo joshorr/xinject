@@ -31,6 +31,16 @@ pip install xinject
 poetry add xinject
 ```
 
+# Note On Backward Breaking Changes
+
+Version 1.11.0: By default, all global dependencies are removed between each unit test run.
+Previously, we removed everything except global, thread-sharable dependencies.
+
+To revert this behavior for a specific dependency, use `remove_between_unittests=False` in its class argument list.
+
+Decided to not make a major breaking change version, as this can only effect unit testing.
+Nothing outside unit testing has a breaking change.
+
 # Quick Start
 
 ```python
