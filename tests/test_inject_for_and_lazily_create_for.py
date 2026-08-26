@@ -264,7 +264,7 @@ class AbstractStore(Dependency, abc.ABC):
         ...
 
 
-class S3Store(AbstractStore, lazily_create_for_abstract_parents=True):
+class S3Store(AbstractStore, lazily_create_for_abs=True):
     def read(self):
         return 'from-s3'
 
@@ -299,7 +299,7 @@ def test_all_abstract_ancestors_claimed_nearest_first():
         def b(self):
             ...
 
-    class Concrete(Middle, lazily_create_for_abstract_parents=True):
+    class Concrete(Middle, lazily_create_for_abs=True):
         def a(self):
             return 'a'
 
@@ -318,7 +318,7 @@ def test_abc_base_with_no_abstract_methods_is_claimed():
     # `inspect.isabstract` is False here, it's caught by the self-declared-ABC check.
     assert inspect.isabstract(Marker) is False
 
-    class Impl(Marker, lazily_create_for_abstract_parents=True):
+    class Impl(Marker, lazily_create_for_abs=True):
         pass
 
     assert lazily_create_for_types(Impl) == (Marker,)
@@ -329,7 +329,7 @@ def test_metaclass_abcmeta_base_is_claimed():
     class ViaMetaclass(Dependency, metaclass=abc.ABCMeta):
         pass
 
-    class Impl(ViaMetaclass, lazily_create_for_abstract_parents=True):
+    class Impl(ViaMetaclass, lazily_create_for_abs=True):
         pass
 
     assert lazily_create_for_types(Impl) == (ViaMetaclass,)
@@ -345,7 +345,7 @@ def test_concrete_ancestors_are_not_claimed():
         def go(self):
             return 'middle'
 
-    class Leaf(ConcreteMiddle, lazily_create_for_abstract_parents=True):
+    class Leaf(ConcreteMiddle, lazily_create_for_abs=True):
         def go(self):
             return 'leaf'
 
@@ -360,7 +360,7 @@ def test_dependency_base_classes_are_never_claimed():
         def go(self):
             ...
 
-    class Impl(AbstractPerThread, lazily_create_for_abstract_parents=True):
+    class Impl(AbstractPerThread, lazily_create_for_abs=True):
         def go(self):
             return 'go'
 
@@ -374,7 +374,7 @@ def test_warns_when_no_abstract_parents_found():
         pass
 
     with pytest.warns(UserWarning, match='none of its parents are abstract'):
-        class Impl(PlainBase, lazily_create_for_abstract_parents=True):
+        class Impl(PlainBase, lazily_create_for_abs=True):
             pass
 
     assert lazily_create_for_types(Impl) == ()
@@ -389,7 +389,7 @@ def test_false_and_unset_claim_nothing():
         def go(self):
             ...
 
-    class ExplicitFalse(AbstractBase, lazily_create_for_abstract_parents=False):
+    class ExplicitFalse(AbstractBase, lazily_create_for_abs=False):
         def go(self):
             return 'x'
 
@@ -414,7 +414,7 @@ def test_merges_with_explicit_lazily_create_for():
     class Impl(
         AbstractBase,
         lazily_create_for=SideTarget,
-        lazily_create_for_abstract_parents=True,
+        lazily_create_for_abs=True,
     ):
         def go(self):
             return 'go'
@@ -431,7 +431,7 @@ def test_flag_is_not_inherited():
         def go(self):
             ...
 
-    class Impl(AbstractBase, lazily_create_for_abstract_parents=True):
+    class Impl(AbstractBase, lazily_create_for_abs=True):
         def go(self):
             return 'go'
 
@@ -449,12 +449,12 @@ def test_two_implementations_collide_with_warning():
         def go(self):
             ...
 
-    class FirstImpl(AbstractBase, lazily_create_for_abstract_parents=True):
+    class FirstImpl(AbstractBase, lazily_create_for_abs=True):
         def go(self):
             return 'first'
 
     with pytest.warns(UserWarning, match='taking over'):
-        class SecondImpl(AbstractBase, lazily_create_for_abstract_parents=True):
+        class SecondImpl(AbstractBase, lazily_create_for_abs=True):
             def go(self):
                 return 'second'
 
@@ -476,7 +476,7 @@ def test_abstract_parents_that_are_not_dependencies_are_skipped():
             ...
 
     class Impl(
-        BaseStore, ReadableMixin, MarkerMixin, lazily_create_for_abstract_parents=True
+        BaseStore, ReadableMixin, MarkerMixin, lazily_create_for_abs=True
     ):
         def read(self):
             return 'r'
@@ -503,7 +503,7 @@ def test_warns_when_only_abstract_parents_are_non_dependencies():
 
     # `LonelyMixin` is abstract but isn't a Dependency, so there is nothing to claim.
     with pytest.warns(UserWarning, match='none of its parents are abstract'):
-        class Impl(PlainBase, LonelyMixin, lazily_create_for_abstract_parents=True):
+        class Impl(PlainBase, LonelyMixin, lazily_create_for_abs=True):
             def go(self):
                 return 'go'
 

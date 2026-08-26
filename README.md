@@ -121,7 +121,7 @@ A few things worth knowing:
   subclass is still created per-thread even when the claimed type is thread-sharable.
 - It's not inherited; a subclass of `AppConfig` does not claim `BaseConfig`.
 
-## `lazily_create_for_abstract_parents`
+## `lazily_create_for_abs`
 
 A bool shorthand: claim every abstract `Dependency` ancestor, so you don't list them by hand.
 
@@ -133,7 +133,7 @@ class BaseStore(Dependency, abc.ABC):
     @abc.abstractmethod
     def read(self): ...
 
-class S3Store(BaseStore, lazily_create_for_abstract_parents=True):
+class S3Store(BaseStore, lazily_create_for_abs=True):
     def read(self):
         return 'from-s3'
 

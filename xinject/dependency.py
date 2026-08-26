@@ -245,7 +245,7 @@ def _abstract_dependency_parents_of(cls: type) -> Tuple[Type, ...]:
 
     Of those, a parent counts as abstract if it has unimplemented abstract methods
     (ie: Python won't let you instantiate it), or if it declared its self an ABC even without any
-    abstract methods on it. See `Dependency.__init_subclass__`'s `lazily_create_for_abstract_parents`.
+    abstract methods on it. See `Dependency.__init_subclass__`'s `lazily_create_for_abs`.
     """
     parents = []
     for parent in cls.__mro__[1:]:
@@ -440,7 +440,7 @@ class Dependency:
             remove_between_unittests: bool | DefaultType = Default,
             attributes_to_skip_while_copying: Iterable[str] | None = Default,
             lazily_create_for: 'Type[Dependency] | Iterable[Type[Dependency]] | DefaultType' = Default,
-            lazily_create_for_abstract_parents: bool | DefaultType = Default,
+            lazily_create_for_abs: bool | DefaultType = Default,
             inject_for: 'Type[Dependency] | Iterable[Type[Dependency]] | DefaultType' = Default,
             **kwargs
     ):
@@ -569,7 +569,7 @@ class Dependency:
                 Not inherited: a subclass of this class does not claim these types, it has to ask
                 for them itself.
 
-            lazily_create_for_abstract_parents: If `True`: every abstract `Dependency` ancestor of
+            lazily_create_for_abs: If `True`: every abstract `Dependency` ancestor of
                 this class is added to `lazily_create_for` for you, so you don't have to list them
                 out by hand.
 
@@ -580,7 +580,7 @@ class Dependency:
                 ...     def read(self):
                 ...         ...
                 >>>
-                >>> class S3Store(BaseStore, lazily_create_for_abstract_parents=True):
+                >>> class S3Store(BaseStore, lazily_create_for_abs=True):
                 ...     def read(self):
                 ...         return 'from-s3'
                 >>>
@@ -686,12 +686,12 @@ class Dependency:
                 lazily_create_for, cls=cls, param_name='lazily_create_for'
             )
 
-        if lazily_create_for_abstract_parents is not Default and lazily_create_for_abstract_parents:
+        if lazily_create_for_abs is not Default and lazily_create_for_abs:
             abstract_parents = _abstract_dependency_parents_of(cls)
             if not abstract_parents:
                 warnings.warn(
                     f"Dependency subclass ({cls.__module__}.{cls.__qualname__}) asked for "
-                    f"`lazily_create_for_abstract_parents`, but none of its parents are abstract "
+                    f"`lazily_create_for_abs`, but none of its parents are abstract "
                     f"`Dependency` subclasses; nothing was claimed. Check that the base you meant "
                     f"still has an `@abstractmethod` on it, or lists `abc.ABC` in its bases.",
                     UserWarning,
