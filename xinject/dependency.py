@@ -130,7 +130,7 @@ import abc
 import functools
 import inspect
 import warnings
-from typing import TypeVar, Iterable, Type, List, Generic, Callable, Any, Optional, Dict, Set, ClassVar, Tuple
+from typing import TypeVar, Iterable, Type, List, Generic, Callable, Any, Optional, Dict, Set, ClassVar
 from copy import copy, deepcopy
 from xsentinels import Default
 from xsentinels.default import DefaultType
@@ -176,7 +176,7 @@ def attributes_to_skip_while_copying(dependency: 'Type[Dependency] | Dependency'
     return getattr(dependency, '_dependency__meta', {}).get('attributes_to_skip_while_copying', set())
 
 
-def inject_for_types(dependency: 'Type[Dependency] | Dependency') -> Tuple[Type, ...]:
+def inject_for_types(dependency: 'Type[Dependency] | Dependency') -> Set[Type]:
     """
     The extra types the passed in Dependency subclass/object should also be mapped for whenever
     it lands in a `xinject.context.XContext`; set via the `inject_for` class argument
@@ -186,21 +186,21 @@ def inject_for_types(dependency: 'Type[Dependency] | Dependency') -> Tuple[Type,
     type is always injected-for, otherwise a dependency you created and added yourself would not
     be found under the type it claimed.
 
-    Returns an empty tuple for anything that did not ask for it
+    Returns an empty set for anything that did not ask for it
     (including non-`Dependency` objects).
     """
-    return (getattr(dependency, '_dependency__meta', None) or {}).get('inject_for', ())
+    return (getattr(dependency, '_dependency__meta', None) or {}).get('inject_for', set())
 
 
-def lazily_create_for_types(dependency: 'Type[Dependency] | Dependency') -> Tuple[Type, ...]:
+def lazily_create_for_types(dependency: 'Type[Dependency] | Dependency') -> Set[Type]:
     """
     The types the passed in Dependency subclass/object has claimed for lazy-creation; set via the
     `lazily_create_for` class argument (see `Dependency.__init_subclass__`).
 
-    Returns an empty tuple for anything that did not ask for it
+    Returns an empty set for anything that did not ask for it
     (including non-`Dependency` objects).
     """
-    return (getattr(dependency, '_dependency__meta', None) or {}).get('lazily_create_for', ())
+    return (getattr(dependency, '_dependency__meta', None) or {}).get('lazily_create_for', set())
 
 
 _lazily_create_for_registry: Dict[Type, 'Type[Dependency]'] = {}
@@ -235,9 +235,9 @@ def _declares_itself_abstract(cls: type) -> bool:
     return False
 
 
-def _abstract_dependency_parents_of(cls: type) -> Tuple[Type, ...]:
+def _abstract_dependency_parents_of(cls: type) -> Set[Type]:
     """
-    Every abstract `Dependency` ancestor of `cls`, nearest-first.
+    Every abstract `Dependency` ancestor of `cls`.
 
     A parent must inherit from `Dependency` to be considered at all; abstract mixins and plain
     `abc.ABC` bases that aren't dependencies are skipped, since nothing would ever ask a
@@ -247,27 +247,27 @@ def _abstract_dependency_parents_of(cls: type) -> Tuple[Type, ...]:
     (ie: Python won't let you instantiate it), or if it declared its self an ABC even without any
     abstract methods on it. See `Dependency.__init_subclass__`'s `lazily_create_for_abs`.
     """
-    parents = []
+    parents = set()
     for parent in cls.__mro__[1:]:
         # Only Dependency subclasses can be asked for, so only they are worth claiming.
         if not issubclass(parent, Dependency):
             continue
         if inspect.isabstract(parent) or _declares_itself_abstract(parent):
-            parents.append(parent)
+            parents.add(parent)
 
-    return tuple(parents)
+    return parents
 
 
 def _dependency_types_from(
         value: 'Type | Iterable[Type]', *, cls: type, param_name: str
-) -> Tuple[Type, ...]:
-    """ Normalizes a single-type-or-iterable class argument into a de-duplicated tuple of types. """
+) -> Set[Type]:
+    """ Normalizes a single-type-or-iterable class argument into a set of types. """
     if value is None:
         value = ()
     elif isinstance(value, type):
         value = (value,)
 
-    types: List[Type] = []
+    types: Set[Type] = set()
     for dep_type in value:
         if not isinstance(dep_type, type):
             raise XInjectError(
@@ -280,10 +280,9 @@ def _dependency_types_from(
                 f"Class argument `{param_name}` on Dependency subclass ({cls.__name__}) lists "
                 f"itself; a Dependency is always mapped for its own type, so remove it."
             )
-        if dep_type not in types:
-            types.append(dep_type)
+        types.add(dep_type)
 
-    return tuple(types)
+    return types
 
 
 class Dependency:
@@ -604,10 +603,11 @@ class Dependency:
                   class its self declared, since `abc.ABCMeta` is inherited by every descendant,
                   concrete ones included.
 
-                All abstract ancestors are claimed, nearest-first, not just the closest one.
+                All abstract ancestors are claimed, not just the closest one.
                 `Dependency` and `DependencyPerThread` are never claimed; neither is abstract.
 
-                Anything you also list in `lazily_create_for` is merged in, no duplicates.
+                Anything you also list in `lazily_create_for` is merged in; the claims are held as
+                a set, so listing a type twice is harmless.
 
                 If `True` and no abstract `Dependency` ancestor is found, we emit a `UserWarning`
                 and carry on; the flag asked for something we couldn't give. This usually means the
@@ -671,16 +671,16 @@ class Dependency:
 
         # These two are deliberately NOT inherited; each subclass has to claim/inject for itself.
         # We reset them here since `meta_dict` may be a copy of a parent that did claim something.
-        meta_dict['inject_for'] = ()
-        meta_dict['lazily_create_for'] = ()
+        meta_dict['inject_for'] = set()
+        meta_dict['lazily_create_for'] = set()
 
-        injected_types = ()
+        injected_types = set()
         if inject_for is not Default:
             injected_types = _dependency_types_from(
                 inject_for, cls=cls, param_name='inject_for'
             )
 
-        claimed_types = ()
+        claimed_types = set()
         if lazily_create_for is not Default:
             claimed_types = _dependency_types_from(
                 lazily_create_for, cls=cls, param_name='lazily_create_for'
@@ -697,7 +697,7 @@ class Dependency:
                     UserWarning,
                     stacklevel=3,
                 )
-            claimed_types += tuple(t for t in abstract_parents if t not in claimed_types)
+            claimed_types |= abstract_parents
 
         if claimed_types:
             meta_dict['lazily_create_for'] = claimed_types
@@ -705,7 +705,7 @@ class Dependency:
             # A claimed type is implicitly injected-for as well; without it, an instance you
             # created and added yourself would not be found under the type it claimed, and asking
             # for that type would lazily create a second instance of this same class.
-            injected_types += tuple(t for t in claimed_types if t not in injected_types)
+            injected_types |= claimed_types
 
             for claimed_type in claimed_types:
                 previous_cls = _lazily_create_for_registry.get(claimed_type)

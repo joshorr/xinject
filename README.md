@@ -166,7 +166,7 @@ Of those, an ancestor counts as abstract if either:
   no abstract methods on it. We check what the class its self declared, since `abc.ABCMeta` is
   inherited by every descendant, concrete ones included.
 
-All abstract ancestors are claimed, nearest-first, and merged with anything you list in
+All abstract ancestors are claimed, not just the closest one, and merged with anything you list in
 `lazily_create_for`. `Dependency` and `DependencyPerThread` are never claimed; neither is abstract.
 
 If the flag is `True` but no abstract ancestor is found, you get a `UserWarning` and nothing is

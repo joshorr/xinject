@@ -50,10 +50,10 @@ def test_lazily_create_for_from_either_direction_is_same_object():
 def test_lazily_create_for_registry_lookup():
     assert lazily_create_type_for(LazyBase) is LazyImpl
     assert lazily_create_type_for(LazyImpl) is None
-    assert lazily_create_for_types(LazyImpl) == (LazyBase,)
+    assert lazily_create_for_types(LazyImpl) == {LazyBase}
 
     # A claimed type is implicitly injected-for as well.
-    assert inject_for_types(LazyImpl) == (LazyBase,)
+    assert inject_for_types(LazyImpl) == {LazyBase}
 
 
 def test_manually_added_claiming_dependency_is_used_for_claimed_type():
@@ -121,7 +121,7 @@ def test_accepts_a_list_of_types():
     class MultiInject(Dependency, inject_for=[TargetOne, TargetTwo]):
         pass
 
-    assert inject_for_types(MultiInject) == (TargetOne, TargetTwo)
+    assert inject_for_types(MultiInject) == {TargetOne, TargetTwo}
 
     obj = MultiInject()
     with obj:
@@ -139,9 +139,9 @@ def test_claimed_types_merge_into_inject_for_without_duplicates():
     class Both(Dependency, inject_for=TargetOne, lazily_create_for=[TargetOne, TargetTwo]):
         pass
 
-    # `TargetOne` is named twice, it should only show up once and keep `inject_for`'s ordering.
-    assert inject_for_types(Both) == (TargetOne, TargetTwo)
-    assert lazily_create_for_types(Both) == (TargetOne, TargetTwo)
+    # `TargetOne` is named twice; the claims are a set, so it collapses to one entry.
+    assert inject_for_types(Both) == {TargetOne, TargetTwo}
+    assert lazily_create_for_types(Both) == {TargetOne, TargetTwo}
 
 
 def test_neither_option_is_inherited():
@@ -154,8 +154,8 @@ def test_neither_option_is_inherited():
     class Child(Claimer):
         pass
 
-    assert inject_for_types(Child) == ()
-    assert lazily_create_for_types(Child) == ()
+    assert inject_for_types(Child) == set()
+    assert lazily_create_for_types(Child) == set()
     assert lazily_create_type_for(Target) is Claimer
 
     # Child still inherits the normal meta options.
@@ -167,7 +167,7 @@ def test_neither_option_is_inherited():
 
     from xinject.dependency import is_dependency_thread_sharable
     assert is_dependency_thread_sharable(PerThreadChild) is False
-    assert inject_for_types(PerThreadChild) == ()
+    assert inject_for_types(PerThreadChild) == set()
 
 
 def test_later_claim_wins_and_warns():
@@ -254,8 +254,8 @@ def test_unclaimed_dependency_behaves_as_before():
     obj = Plain.grab()
     assert type(obj) is Plain
     assert Plain.grab() is obj
-    assert inject_for_types(Plain) == ()
-    assert lazily_create_for_types(Plain) == ()
+    assert inject_for_types(Plain) == set()
+    assert lazily_create_for_types(Plain) == set()
 
 
 class AbstractStore(Dependency, abc.ABC):
@@ -270,7 +270,7 @@ class S3Store(AbstractStore, lazily_create_for_abs=True):
 
 
 def test_abstract_parent_is_claimed():
-    assert lazily_create_for_types(S3Store) == (AbstractStore,)
+    assert lazily_create_for_types(S3Store) == {AbstractStore}
     assert lazily_create_type_for(AbstractStore) is S3Store
 
     obj = AbstractStore.grab()
@@ -280,14 +280,14 @@ def test_abstract_parent_is_claimed():
 
 
 def test_abstract_parent_claim_also_injects_for():
-    assert inject_for_types(S3Store) == (AbstractStore,)
+    assert inject_for_types(S3Store) == {AbstractStore}
 
     manual = S3Store()
     with manual:
         assert AbstractStore.grab() is manual
 
 
-def test_all_abstract_ancestors_claimed_nearest_first():
+def test_all_abstract_ancestors_are_claimed():
     class Root(Dependency, abc.ABC):
         @abc.abstractmethod
         def a(self):
@@ -306,7 +306,7 @@ def test_all_abstract_ancestors_claimed_nearest_first():
         def b(self):
             return 'b'
 
-    assert lazily_create_for_types(Concrete) == (Middle, Root)
+    assert lazily_create_for_types(Concrete) == {Middle, Root}
     assert type(Root.grab()) is Concrete
     assert Root.grab() is Middle.grab()
 
@@ -321,7 +321,7 @@ def test_abc_base_with_no_abstract_methods_is_claimed():
     class Impl(Marker, lazily_create_for_abs=True):
         pass
 
-    assert lazily_create_for_types(Impl) == (Marker,)
+    assert lazily_create_for_types(Impl) == {Marker}
     assert type(Marker.grab()) is Impl
 
 
@@ -332,7 +332,7 @@ def test_metaclass_abcmeta_base_is_claimed():
     class Impl(ViaMetaclass, lazily_create_for_abs=True):
         pass
 
-    assert lazily_create_for_types(Impl) == (ViaMetaclass,)
+    assert lazily_create_for_types(Impl) == {ViaMetaclass}
 
 
 def test_concrete_ancestors_are_not_claimed():
@@ -350,7 +350,7 @@ def test_concrete_ancestors_are_not_claimed():
             return 'leaf'
 
     # `ConcreteMiddle` inherits ABCMeta but implements everything, so it is not claimed.
-    assert lazily_create_for_types(Leaf) == (AbstractBase,)
+    assert lazily_create_for_types(Leaf) == {AbstractBase}
     assert type(ConcreteMiddle.grab()) is ConcreteMiddle
 
 
@@ -364,7 +364,7 @@ def test_dependency_base_classes_are_never_claimed():
         def go(self):
             return 'go'
 
-    assert lazily_create_for_types(Impl) == (AbstractPerThread,)
+    assert lazily_create_for_types(Impl) == {AbstractPerThread}
     assert Dependency not in lazily_create_for_types(Impl)
     assert DependencyPerThread not in lazily_create_for_types(Impl)
 
@@ -377,8 +377,8 @@ def test_warns_when_no_abstract_parents_found():
         class Impl(PlainBase, lazily_create_for_abs=True):
             pass
 
-    assert lazily_create_for_types(Impl) == ()
-    assert inject_for_types(Impl) == ()
+    assert lazily_create_for_types(Impl) == set()
+    assert inject_for_types(Impl) == set()
     # Warned, but carried on; `PlainBase` is unclaimed and lazily creates its self.
     assert type(PlainBase.grab()) is PlainBase
 
@@ -397,8 +397,8 @@ def test_false_and_unset_claim_nothing():
         def go(self):
             return 'y'
 
-    assert lazily_create_for_types(ExplicitFalse) == ()
-    assert lazily_create_for_types(Unset) == ()
+    assert lazily_create_for_types(ExplicitFalse) == set()
+    assert lazily_create_for_types(Unset) == set()
     assert lazily_create_type_for(AbstractBase) is None
 
 
@@ -419,8 +419,8 @@ def test_merges_with_explicit_lazily_create_for():
         def go(self):
             return 'go'
 
-    assert lazily_create_for_types(Impl) == (SideTarget, AbstractBase)
-    assert inject_for_types(Impl) == (SideTarget, AbstractBase)
+    assert lazily_create_for_types(Impl) == {SideTarget, AbstractBase}
+    assert inject_for_types(Impl) == {SideTarget, AbstractBase}
     assert type(SideTarget.grab()) is Impl
     assert SideTarget.grab() is AbstractBase.grab()
 
@@ -439,7 +439,7 @@ def test_flag_is_not_inherited():
     class Child(Impl):
         pass
 
-    assert lazily_create_for_types(Child) == ()
+    assert lazily_create_for_types(Child) == set()
     assert lazily_create_type_for(AbstractBase) is Impl
 
 
@@ -488,8 +488,8 @@ def test_abstract_parents_that_are_not_dependencies_are_skipped():
     assert ReadableMixin in Impl.__mro__
     assert MarkerMixin in Impl.__mro__
     assert abc.ABC in Impl.__mro__
-    assert lazily_create_for_types(Impl) == (BaseStore,)
-    assert inject_for_types(Impl) == (BaseStore,)
+    assert lazily_create_for_types(Impl) == {BaseStore}
+    assert inject_for_types(Impl) == {BaseStore}
 
 
 def test_warns_when_only_abstract_parents_are_non_dependencies():
@@ -507,4 +507,4 @@ def test_warns_when_only_abstract_parents_are_non_dependencies():
             def go(self):
                 return 'go'
 
-    assert lazily_create_for_types(Impl) == ()
+    assert lazily_create_for_types(Impl) == set()
