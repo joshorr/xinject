@@ -310,7 +310,7 @@ import functools
 import threading
 from weakref import WeakSet
 from functools import cached_property
-from typing import TypeVar, Type, Dict, List, Optional, Union, Any, Iterable, Set, Self, Iterator
+from typing import TypeVar, Type, Dict, List, Optional, Union, Any, Iterable, Set, Self, Iterator, Tuple
 
 from xsentinels.default import Default, DefaultType
 from xsentinels.singleton import Singleton
@@ -608,12 +608,6 @@ class XContext:
         Args:
             dependency (Any): Object to add as a dependency, it's type will be mapped to it.
 
-            skip_if_present (bool): If False [default], we raise an exception if dependency
-                of that type is already in context/self.
-
-                If True, we don't do anything if dependency of that type is already in
-                context/self.
-
             for_type: You can force a particular mapping by using this option.
                 By default, the `for_type` is set to the type of the passed in dependency
                 [via `type(dependency)`].
@@ -622,17 +616,48 @@ class XContext:
                 We will then map the dependency for `for_type` to the `dependency` object when
                 a dependency is requested for `for_type` in the future. Will still raise the
                 error if a dependency for `for_type` already exists in Context.
+
+                Any extra types the dependency's class declared via the `inject_for` /
+                `lazily_create_for` class arguments are mapped in addition to `for_type`;
+                see `xinject.dependency.Dependency.__init_subclass__`.
         Returns:
             Return `self`, so that you can keep calling more methods easily if needed
             (ie: .add(), etc)
         """
+        from xinject.dependency import inject_for_types
+
         if for_type is None:
             for_type = type(dependency)
 
         self._dependencies[for_type] = dependency
+
+        # Dependency subclasses can ask to be mapped for extra types via the `inject_for`
+        # class argument (`lazily_create_for` implicitly adds to it).
+        for injected_type in inject_for_types(dependency):
+            self._dependencies[injected_type] = dependency
+
         if self._sibling:
             self._sibling.add(dependency, for_type=for_type)
         return self
+
+    def _find_dependency_in_chain(
+            self, for_type: Type, *, yield_from_other_threads: bool
+    ) -> Tuple[Any, 'XContext | None']:
+        """
+        Walks the context-chain looking for an existing dependency mapped for `for_type`.
+
+        Returns a `(dependency, last_context)` tuple. `dependency` is `None` when nothing in the
+        chain has one. `last_context` is the farthest context down the chain, ie: where a new
+        dependency should be created so it's visible to as many others as possible.
+        """
+        last_ctx = None
+        for ctx in self.ctx_chain(yield_from_other_threads=yield_from_other_threads):
+            last_ctx = ctx
+            obj = ctx._dependencies.get(for_type, None)
+            if obj is not None:
+                return obj, last_ctx
+
+        return None, last_ctx
 
     def dependency(
             self, for_type: Type[ResourceTypeVar], *, create: bool = True
@@ -709,6 +734,14 @@ class XContext:
         class-method on the `for_type` class that would accept these extra parameters and then
         check the current Context and allocate or return the existing context resource as needed.
 
+        ## Thread Safety
+
+        Lazily creating a dependency is guarded by a global re-entrant lock, so two threads asking
+        for the same dependency at the same moment can't each end up with their own instance;
+        one creates it, the other gets handed that same object.
+
+        Looking up a dependency that already exists takes no lock at all, more optimial that way.
+
         Args:
             for_type (Type[ResourceTypeVar]): The type of resource you need, and instance of
                 this type will be returned.
@@ -749,35 +782,66 @@ class XContext:
         #
         # So, code using a Dependency in general should never have to worry about this None case.
 
-        from xinject.dependency import is_dependency_thread_sharable
-        is_thread_sharable = is_dependency_thread_sharable(for_type)
+        from xinject.dependency import (
+            is_dependency_thread_sharable, inject_for_types, lazily_create_type_for
+        )
+
+        # A Dependency subclass can claim `for_type` via its `lazily_create_for` class argument;
+        # if one did, that's the class we construct rather than `for_type` its self.
+        create_type = lazily_create_type_for(for_type) or for_type
+
+        # Where the object is allowed to live is a property of what we'd actually construct,
+        # not of what was asked for.
+        is_thread_sharable = is_dependency_thread_sharable(create_type)
 
         if self._is_app_root and not is_thread_sharable:
             # We can't allocate a non-thread-sharable dependency in the app-root context,
             # and there are no more parents; so we always return `None` in this case.
             return None
 
-        last_ctx = None
-        for ctx in self.ctx_chain(yield_from_other_threads=is_thread_sharable):
-            last_ctx = ctx
-            obj = ctx._dependencies.get(for_type, None)
-            if obj is not None:
-                # TODO: I have another TODO in this file about caching these, check that for details.
-                # # Store in self (and all other ctx's up to this point) for future reuse?
-                # self._cached_parent_dependencies[for_type] = parent_value
-                return obj
+        # Fast path, no lock taken: we're only reading, and individual dict reads are atomic.
+        # Worst case we miss a dependency another thread is creating right now, and then find it
+        # in the re-check under the lock below.
+        # TODO: I have another TODO in this file about caching these, check that for details.
+        # # Store in self (and all other ctx's up to this point) for future reuse?
+        # self._cached_parent_dependencies[for_type] = parent_value
+        obj, last_ctx = self._find_dependency_in_chain(
+            for_type, yield_from_other_threads=is_thread_sharable
+        )
+        if obj is not None:
+            return obj
 
         # If we can't create the dependency, we simply return `None`; nothing more to do.
         if not create:
             return None
 
-        # We next create dependency if we don't have an existing one.
-        # Allocate a blank object if we have no parent-value to use.
-        # We add it to the ctx farthest down the stack, so it can be more visible to others
-        # (this reduces the number of redundant Dependency instances to the minimum).
-        # If `is_thread_sharable` is `False`, the last one is guaranteed to be the thread-root.
-        obj = for_type()
-        last_ctx._dependencies[for_type] = obj
+        # TODO: Can probably optimize this in the future by doing a lock per-dependency type,
+        #   for now keeping it simple.
+        with _lazily_create_dependency__lock:
+            # Look again now that we hold the lock. Another thread may have created it while we
+            # waited, and we have to hand back their object instead of making a second one.
+            obj, last_ctx = self._find_dependency_in_chain(
+                for_type, yield_from_other_threads=is_thread_sharable
+            )
+            if obj is not None:
+                return obj
+
+            # We next create dependency if we don't have an existing one.
+            # Allocate a blank object if we have no parent-value to use;
+            # `create_type` is normally `for_type`, unless another Dependency subclass claimed
+            # `for_type` via its `lazily_create_for` class argument.
+            # We add it to the ctx farthest down the stack, so it can be more visible to others
+            # (this reduces the number of redundant Dependency instances to the minimum).
+            # If `is_thread_sharable` is `False`, the last one is guaranteed to be the thread-root.
+            #
+            # The dependency is constructed while holding the lock, which is why it's an `RLock`;
+            # a `__init__` that asks for some other dependency re-enters us on this same thread.
+            obj = create_type()
+            dependencies = last_ctx._dependencies
+            dependencies[for_type] = obj
+            dependencies[create_type] = obj
+            for injected_type in inject_for_types(obj):
+                dependencies[injected_type] = obj
 
         # TODO: I have another TODO in this file about caching these, check that for details.
         # # Store in self and all other ctx's on the stack for future reuse?
@@ -818,8 +882,11 @@ class XContext:
                 hierarchy.
         """
         objs_already_seen = set()
-        from xinject.dependency import is_dependency_thread_sharable
-        is_thread_sharable = is_dependency_thread_sharable(for_type)
+        from xinject.dependency import is_dependency_thread_sharable, lazily_create_type_for
+
+        # Which contexts are visible follows whatever would actually be created for `for_type`.
+        create_type = lazily_create_type_for(for_type) or for_type
+        is_thread_sharable = is_dependency_thread_sharable(create_type)
 
         for context in self.ctx_chain(yield_from_other_threads=is_thread_sharable):
             obj = context.dependency(for_type=for_type, create=create)
@@ -1515,12 +1582,15 @@ def _setup_blank_app_and_thread_root_contexts_globals(keep_global_context: bool 
         _app_root_context = XContext(parent=_TreatAsRootParent, name='AppRoot')
         _app_root_context._is_app_root = True
     else:
-        from xinject.dependency import is_dependency_removed_between_unittests, Dependency
+        from xinject.dependency import is_dependency_removed_between_unittests
         # Remove any dependencies from/in global context that configure themselves as wanting that.
-        for k in list(_app_root_context._dependencies):
-            k: Type[Dependency]
-            if is_dependency_removed_between_unittests(k):
-                _app_root_context._dependencies.pop(k, None)
+        #
+        # We ask the stored object, not the key; one object can be mapped under several keys via
+        # the `inject_for` / `lazily_create_for` class arguments, and it's the object's own class
+        # that decides whether it survives between unit tests.
+        for key, obj in list(_app_root_context._dependencies.items()):
+            if is_dependency_removed_between_unittests(obj):
+                _app_root_context._dependencies.pop(key, None)
 
     # Keeping this private for now, everything outside of this module should use the XContext class
     # as a ContextManager/ContextDecorator to get/set current context.
@@ -1551,6 +1621,19 @@ class _ThreadStorage(threading.local):
         with _all_thread_storage_ctxs__lock:
             _all_thread_storage_ctxs.add(ctx)
 
+
+_lazily_create_dependency__lock = threading.RLock()
+""" Guards lazily creating a dependency, so two threads asking for the same one at the same time
+    can't each construct their own; see `XContext.dependency`.
+
+    Must stay an `RLock`: a `Dependency.__init__` is run while this is held, and it's normal for
+    one to ask for some other dependency, which re-enters `XContext.dependency` on this same
+    thread. A plain `Lock` would deadlock on that.
+
+    A single global lock (rather than one per dependency-type) is what makes that re-entrancy
+    safe; with per-type locks, two threads creating dependencies that ask for each other could
+    deadlock against each other.
+"""
 
 _all_thread_storage_ctxs__lock = threading.Lock()
 _all_thread_storage_ctxs: WeakSet[XContext] = WeakSet()
