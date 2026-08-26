@@ -622,14 +622,26 @@ class XContext:
                 We will then map the dependency for `for_type` to the `dependency` object when
                 a dependency is requested for `for_type` in the future. Will still raise the
                 error if a dependency for `for_type` already exists in Context.
+
+                Any extra types the dependency's class declared via the `inject_for` /
+                `lazily_create_for` class arguments are mapped in addition to `for_type`;
+                see `xinject.dependency.Dependency.__init_subclass__`.
         Returns:
             Return `self`, so that you can keep calling more methods easily if needed
             (ie: .add(), etc)
         """
+        from xinject.dependency import inject_for_types
+
         if for_type is None:
             for_type = type(dependency)
 
         self._dependencies[for_type] = dependency
+
+        # Dependency subclasses can ask to be mapped for extra types via the `inject_for`
+        # class argument (`lazily_create_for` implicitly adds to it).
+        for injected_type in inject_for_types(dependency):
+            self._dependencies[injected_type] = dependency
+
         if self._sibling:
             self._sibling.add(dependency, for_type=for_type)
         return self
@@ -749,8 +761,17 @@ class XContext:
         #
         # So, code using a Dependency in general should never have to worry about this None case.
 
-        from xinject.dependency import is_dependency_thread_sharable
-        is_thread_sharable = is_dependency_thread_sharable(for_type)
+        from xinject.dependency import (
+            is_dependency_thread_sharable, inject_for_types, lazily_create_type_for
+        )
+
+        # A Dependency subclass can claim `for_type` via its `lazily_create_for` class argument;
+        # if one did, that's the class we construct rather than `for_type` its self.
+        create_type = lazily_create_type_for(for_type) or for_type
+
+        # Where the object is allowed to live is a property of what we'd actually construct,
+        # not of what was asked for.
+        is_thread_sharable = is_dependency_thread_sharable(create_type)
 
         if self._is_app_root and not is_thread_sharable:
             # We can't allocate a non-thread-sharable dependency in the app-root context,
@@ -772,12 +793,18 @@ class XContext:
             return None
 
         # We next create dependency if we don't have an existing one.
-        # Allocate a blank object if we have no parent-value to use.
+        # Allocate a blank object if we have no parent-value to use;
+        # `create_type` is normally `for_type`, unless another Dependency subclass claimed
+        # `for_type` via its `lazily_create_for` class argument.
         # We add it to the ctx farthest down the stack, so it can be more visible to others
         # (this reduces the number of redundant Dependency instances to the minimum).
         # If `is_thread_sharable` is `False`, the last one is guaranteed to be the thread-root.
-        obj = for_type()
-        last_ctx._dependencies[for_type] = obj
+        obj = create_type()
+        dependencies = last_ctx._dependencies
+        dependencies[for_type] = obj
+        dependencies[create_type] = obj
+        for injected_type in inject_for_types(obj):
+            dependencies[injected_type] = obj
 
         # TODO: I have another TODO in this file about caching these, check that for details.
         # # Store in self and all other ctx's on the stack for future reuse?
@@ -818,8 +845,11 @@ class XContext:
                 hierarchy.
         """
         objs_already_seen = set()
-        from xinject.dependency import is_dependency_thread_sharable
-        is_thread_sharable = is_dependency_thread_sharable(for_type)
+        from xinject.dependency import is_dependency_thread_sharable, lazily_create_type_for
+
+        # Which contexts are visible follows whatever would actually be created for `for_type`.
+        create_type = lazily_create_type_for(for_type) or for_type
+        is_thread_sharable = is_dependency_thread_sharable(create_type)
 
         for context in self.ctx_chain(yield_from_other_threads=is_thread_sharable):
             obj = context.dependency(for_type=for_type, create=create)
@@ -1515,12 +1545,15 @@ def _setup_blank_app_and_thread_root_contexts_globals(keep_global_context: bool 
         _app_root_context = XContext(parent=_TreatAsRootParent, name='AppRoot')
         _app_root_context._is_app_root = True
     else:
-        from xinject.dependency import is_dependency_removed_between_unittests, Dependency
+        from xinject.dependency import is_dependency_removed_between_unittests
         # Remove any dependencies from/in global context that configure themselves as wanting that.
-        for k in list(_app_root_context._dependencies):
-            k: Type[Dependency]
-            if is_dependency_removed_between_unittests(k):
-                _app_root_context._dependencies.pop(k, None)
+        #
+        # We ask the stored object, not the key; one object can be mapped under several keys via
+        # the `inject_for` / `lazily_create_for` class arguments, and it's the object's own class
+        # that decides whether it survives between unit tests.
+        for key, obj in list(_app_root_context._dependencies.items()):
+            if is_dependency_removed_between_unittests(obj):
+                _app_root_context._dependencies.pop(key, None)
 
     # Keeping this private for now, everything outside of this module should use the XContext class
     # as a ContextManager/ContextDecorator to get/set current context.

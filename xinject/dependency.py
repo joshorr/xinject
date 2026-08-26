@@ -126,8 +126,11 @@ For more info/details see:
 
 
 """
+import abc
 import functools
-from typing import TypeVar, Iterable, Type, List, Generic, Callable, Any, Optional, Dict, Set, ClassVar
+import inspect
+import warnings
+from typing import TypeVar, Iterable, Type, List, Generic, Callable, Any, Optional, Dict, Set, ClassVar, Tuple
 from copy import copy, deepcopy
 from xsentinels import Default
 from xsentinels.default import DefaultType
@@ -171,6 +174,116 @@ def is_dependency_removed_between_unittests(dependency: 'Type[Dependency] | Depe
 
 def attributes_to_skip_while_copying(dependency: 'Type[Dependency] | Dependency') -> Set[str]:
     return getattr(dependency, '_dependency__meta', {}).get('attributes_to_skip_while_copying', set())
+
+
+def inject_for_types(dependency: 'Type[Dependency] | Dependency') -> Tuple[Type, ...]:
+    """
+    The extra types the passed in Dependency subclass/object should also be mapped for whenever
+    it lands in a `xinject.context.XContext`; set via the `inject_for` class argument
+    (see `Dependency.__init_subclass__`).
+
+    Anything the class claimed via `lazily_create_for` is implicitly part of this too; a claimed
+    type is always injected-for, otherwise a dependency you created and added yourself would not
+    be found under the type it claimed.
+
+    Returns an empty tuple for anything that did not ask for it
+    (including non-`Dependency` objects).
+    """
+    return (getattr(dependency, '_dependency__meta', None) or {}).get('inject_for', ())
+
+
+def lazily_create_for_types(dependency: 'Type[Dependency] | Dependency') -> Tuple[Type, ...]:
+    """
+    The types the passed in Dependency subclass/object has claimed for lazy-creation; set via the
+    `lazily_create_for` class argument (see `Dependency.__init_subclass__`).
+
+    Returns an empty tuple for anything that did not ask for it
+    (including non-`Dependency` objects).
+    """
+    return (getattr(dependency, '_dependency__meta', None) or {}).get('lazily_create_for', ())
+
+
+_lazily_create_for_registry: Dict[Type, 'Type[Dependency]'] = {}
+""" Maps a requested type to the `Dependency` subclass that should be created in its place.
+    Populated by `Dependency.__init_subclass__` via its `lazily_create_for` class argument.
+"""
+
+
+def lazily_create_type_for(for_type: Type) -> 'Type[Dependency] | None':
+    """
+    The `Dependency` subclass that claimed `for_type` via its `lazily_create_for` class argument,
+    or `None` if nothing claimed it.
+
+    `xinject.context.XContext.dependency` uses this to decide what class to actually construct
+    when `for_type` is asked for and no instance exists anywhere in the context-chain.
+    """
+    return _lazily_create_for_registry.get(for_type)
+
+
+def _declares_itself_abstract(cls: type) -> bool:
+    """
+    Whether `cls` declared its self an ABC, as opposed to merely inheriting `abc.ABCMeta` from a
+    base (every descendant of an ABC inherits that metaclass, concrete ones included).
+    """
+    if abc.ABC in cls.__bases__:
+        return True
+
+    # Covers `class Foo(Dependency, metaclass=ABCMeta)`; only counts when no base had it already.
+    if isinstance(cls, abc.ABCMeta):
+        return not any(isinstance(base, abc.ABCMeta) for base in cls.__bases__)
+
+    return False
+
+
+def _abstract_dependency_parents_of(cls: type) -> Tuple[Type, ...]:
+    """
+    Every abstract `Dependency` ancestor of `cls`, nearest-first.
+
+    A parent must inherit from `Dependency` to be considered at all; abstract mixins and plain
+    `abc.ABC` bases that aren't dependencies are skipped, since nothing would ever ask a
+    `xinject.context.XContext` for them.
+
+    Of those, a parent counts as abstract if it has unimplemented abstract methods
+    (ie: Python won't let you instantiate it), or if it declared its self an ABC even without any
+    abstract methods on it. See `Dependency.__init_subclass__`'s `lazily_create_for_abstract_parents`.
+    """
+    parents = []
+    for parent in cls.__mro__[1:]:
+        # Only Dependency subclasses can be asked for, so only they are worth claiming.
+        if not issubclass(parent, Dependency):
+            continue
+        if inspect.isabstract(parent) or _declares_itself_abstract(parent):
+            parents.append(parent)
+
+    return tuple(parents)
+
+
+def _dependency_types_from(
+        value: 'Type | Iterable[Type]', *, cls: type, param_name: str
+) -> Tuple[Type, ...]:
+    """ Normalizes a single-type-or-iterable class argument into a de-duplicated tuple of types. """
+    if value is None:
+        value = ()
+    elif isinstance(value, type):
+        value = (value,)
+
+    types: List[Type] = []
+    for dep_type in value:
+        if not isinstance(dep_type, type):
+            raise XInjectError(
+                f"Class argument `{param_name}` on Dependency subclass ({cls.__name__}) was given "
+                f"({dep_type!r}), which is not a class; it must be a class "
+                f"(normally another `Dependency` subclass), or a list of them."
+            )
+        if dep_type is cls:
+            raise XInjectError(
+                f"Class argument `{param_name}` on Dependency subclass ({cls.__name__}) lists "
+                f"itself; a Dependency is always mapped for its own type, so remove it."
+            )
+        if dep_type not in types:
+            types.append(dep_type)
+
+    return tuple(types)
 
 
 class Dependency:
@@ -326,6 +439,9 @@ class Dependency:
             thread_sharable: bool | DefaultType = Default,
             remove_between_unittests: bool | DefaultType = Default,
             attributes_to_skip_while_copying: Iterable[str] | None = Default,
+            lazily_create_for: 'Type[Dependency] | Iterable[Type[Dependency]] | DefaultType' = Default,
+            lazily_create_for_abstract_parents: bool | DefaultType = Default,
+            inject_for: 'Type[Dependency] | Iterable[Type[Dependency]] | DefaultType' = Default,
             **kwargs
     ):
         """
@@ -410,6 +526,123 @@ class Dependency:
                 To see where it's used, look at:
                 - `Dependency.__copy__`
                 - `Dependency.__deepcopy__`
+
+            lazily_create_for: One type, or a list of types, that this subclass should be created
+                in place of.
+
+                When one of the listed types is asked for and no instance of it exists anywhere in
+                the current context-chain, we create an instance of **this** subclass instead of
+                the type that was asked for, and map that one object for both this subclass and
+                every type in this list.
+
+                >>> class BaseConfig(Dependency):
+                ...     pass
+                >>>
+                >>> class AppConfig(BaseConfig, lazily_create_for=BaseConfig):
+                ...     pass
+                >>>
+                >>> # Nothing exists yet, so an `AppConfig` is created and mapped for both types:
+                >>> assert type(BaseConfig.grab()) is AppConfig
+                >>> assert AppConfig.grab() is BaseConfig.grab()
+
+                The listed types don't have to be superclasses of this one, they just have to be
+                types someone asks a `xinject.context.XContext` for.
+
+                The listed types are implicitly added to `inject_for`, so an instance you
+                create and add yourself (via `with`, a decorator, or
+                `xinject.context.XContext.add`) is mapped for them too. Without that, asking for a
+                listed type while your instance was active would lazily create a second instance
+                of this same class.
+
+                Whichever type triggers the creation, `thread_sharable` is read off **this**
+                subclass (the one actually being constructed), so a `DependencyPerThread` subclass
+                still gets created per-thread even when the type asked for is thread-sharable.
+
+                This is a **global** claim on the listed types, and it's registered when this class
+                is defined, ie: when its module is first imported. If a listed type was already
+                lazily created before this class got imported, that existing object stays; import
+                your claiming subclass before the type it claims is first used.
+
+                If a second, unrelated class later claims a type this class already claimed, the
+                later definition wins and a `UserWarning` is emitted naming both classes.
+
+                Not inherited: a subclass of this class does not claim these types, it has to ask
+                for them itself.
+
+            lazily_create_for_abstract_parents: If `True`: every abstract `Dependency` ancestor of
+                this class is added to `lazily_create_for` for you, so you don't have to list them
+                out by hand.
+
+                >>> import abc
+                >>>
+                >>> class BaseStore(Dependency, abc.ABC):
+                ...     @abc.abstractmethod
+                ...     def read(self):
+                ...         ...
+                >>>
+                >>> class S3Store(BaseStore, lazily_create_for_abstract_parents=True):
+                ...     def read(self):
+                ...         return 'from-s3'
+                >>>
+                >>> assert type(BaseStore.grab()) is S3Store
+
+                Without this, `BaseStore.grab()` would try to construct `BaseStore` and die with
+                `TypeError: Can't instantiate abstract class`. The whole point of an abstract
+                Dependency is that code depends on the base while something else supplies the
+                implementation, and this wires that up in one flag.
+
+                An ancestor is only considered if it inherits from `Dependency`. Abstract
+                mixins and plain `abc.ABC` bases that aren't dependencies are skipped, since
+                nothing would ever ask a `xinject.context.XContext` for them.
+
+                Of those, an ancestor counts as abstract if either:
+
+                - It has unimplemented abstract methods, ie: `inspect.isabstract` is `True` and
+                  Python refuses to instantiate it.
+                - It declared its self an ABC (`abc.ABC` in its own bases, or
+                  `metaclass=abc.ABCMeta`), even with no abstract methods on it. We check what the
+                  class its self declared, since `abc.ABCMeta` is inherited by every descendant,
+                  concrete ones included.
+
+                All abstract ancestors are claimed, nearest-first, not just the closest one.
+                `Dependency` and `DependencyPerThread` are never claimed; neither is abstract.
+
+                Anything you also list in `lazily_create_for` is merged in, no duplicates.
+
+                If `True` and no abstract `Dependency` ancestor is found, we emit a `UserWarning`
+                and carry on; the flag asked for something we couldn't give. This usually means the
+                base stopped being abstract (its last `@abstractmethod` went away).
+
+                Two concrete subclasses of the same abstract base that both set this will collide,
+                and the later definition wins with a warning; see `lazily_create_for`.
+
+                Not inherited: a subclass of this class does not re-claim, it has to ask itself.
+
+            inject_for: One type, or a list of types, that instances of this subclass should
+                **also** be mapped for whenever they land in a `xinject.context.XContext`.
+
+                >>> class BaseAuth(Dependency):
+                ...     pass
+                >>>
+                >>> class FakeAuth(Dependency, inject_for=BaseAuth):
+                ...     pass
+                >>>
+                >>> fake = FakeAuth()
+                >>> with fake:
+                ...     assert BaseAuth.grab() is fake
+                ...     assert FakeAuth.grab() is fake
+
+                Unlike `lazily_create_for`, this does nothing on its own; it only takes effect for
+                instances that actually get put in a context. Asking for `BaseAuth` when no
+                `FakeAuth` is active still lazily creates a plain `BaseAuth`.
+
+                The mapping applies however the instance gets added: `xinject.context.XContext.add`
+                (including when `for_type` is passed explicitly), the `dependencies` argument of
+                `xinject.context.XContext`, a `with` statement, a decorator, or lazy creation.
+
+                Not inherited: a subclass of this class does not inject for these types, it has to
+                ask for them itself.
+
             **kwargs:
 
         Returns:
@@ -435,6 +668,59 @@ class Dependency:
         if attributes_to_skip_while_copying is not Default:
             attr_set: set = meta_dict['attributes_to_skip_while_copying']
             attr_set.update(attributes_to_skip_while_copying)
+
+        # These two are deliberately NOT inherited; each subclass has to claim/inject for itself.
+        # We reset them here since `meta_dict` may be a copy of a parent that did claim something.
+        meta_dict['inject_for'] = ()
+        meta_dict['lazily_create_for'] = ()
+
+        injected_types = ()
+        if inject_for is not Default:
+            injected_types = _dependency_types_from(
+                inject_for, cls=cls, param_name='inject_for'
+            )
+
+        claimed_types = ()
+        if lazily_create_for is not Default:
+            claimed_types = _dependency_types_from(
+                lazily_create_for, cls=cls, param_name='lazily_create_for'
+            )
+
+        if lazily_create_for_abstract_parents is not Default and lazily_create_for_abstract_parents:
+            abstract_parents = _abstract_dependency_parents_of(cls)
+            if not abstract_parents:
+                warnings.warn(
+                    f"Dependency subclass ({cls.__module__}.{cls.__qualname__}) asked for "
+                    f"`lazily_create_for_abstract_parents`, but none of its parents are abstract "
+                    f"`Dependency` subclasses; nothing was claimed. Check that the base you meant "
+                    f"still has an `@abstractmethod` on it, or lists `abc.ABC` in its bases.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+            claimed_types += tuple(t for t in abstract_parents if t not in claimed_types)
+
+        if claimed_types:
+            meta_dict['lazily_create_for'] = claimed_types
+
+            # A claimed type is implicitly injected-for as well; without it, an instance you
+            # created and added yourself would not be found under the type it claimed, and asking
+            # for that type would lazily create a second instance of this same class.
+            injected_types += tuple(t for t in claimed_types if t not in injected_types)
+
+            for claimed_type in claimed_types:
+                previous_cls = _lazily_create_for_registry.get(claimed_type)
+                if previous_cls is not None and previous_cls is not cls:
+                    warnings.warn(
+                        f"Dependency subclass ({cls.__module__}.{cls.__qualname__}) is taking over "
+                        f"the `lazily_create_for` claim on ({claimed_type.__name__}) from "
+                        f"({previous_cls.__module__}.{previous_cls.__qualname__}); the later "
+                        f"definition wins, so which one you get depends on import order.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                _lazily_create_for_registry[claimed_type] = cls
+
+        meta_dict['inject_for'] = injected_types
 
     _dependency__meta = None
 

@@ -5,6 +5,7 @@
 - [Documentation](#documentation)
 - [Install](#install)
 - [Quick Start](#quick-start)
+- [Substituting One Dependency For Another](#substituting-one-dependency-for-another)
 - [Licensing](#licensing)
 
 # Introduction
@@ -81,6 +82,117 @@ def get_s3_file_from_us_west(file, dest_path):
 def get_s3_file_from_us_west(file, dest_path):
     download_file(file, dest_path)
 ```
+
+# Substituting One Dependency For Another
+
+Two class arguments let a `Dependency` subclass stand in for other types, so code can keep asking
+for the type it knows about while getting the implementation you actually want.
+
+## `lazily_create_for`
+
+Claims one or more types. When a claimed type is asked for and no instance exists yet, your
+subclass is created instead, and that single object is mapped for both types:
+
+```python
+from xinject import Dependency
+
+# Defined by a library; app code only ever imports this one.
+class BaseConfig(Dependency):
+    default_region = 'us-east-1'
+
+# Defined by your app.
+class AppConfig(BaseConfig, lazily_create_for=BaseConfig):
+    default_region = 'us-west-2'
+
+assert type(BaseConfig.grab()) is AppConfig
+assert BaseConfig.grab() is AppConfig.grab()
+```
+
+The claimed types don't have to be superclasses; they just have to be types someone asks for.
+
+A few things worth knowing:
+
+- The claim is **global** and registered when your class is defined, ie: when its module is first
+  imported. If the claimed type was already lazily created before then, the existing object stays.
+  Import the claiming subclass before the type it claims is first used.
+- If a second, unrelated class later claims the same type, the later definition wins and a
+  `UserWarning` is emitted naming both classes.
+- `thread_sharable` is read off the class actually being created, so a `DependencyPerThread`
+  subclass is still created per-thread even when the claimed type is thread-sharable.
+- It's not inherited; a subclass of `AppConfig` does not claim `BaseConfig`.
+
+## `lazily_create_for_abstract_parents`
+
+A bool shorthand: claim every abstract `Dependency` ancestor, so you don't list them by hand.
+
+```python
+import abc
+from xinject import Dependency
+
+class BaseStore(Dependency, abc.ABC):
+    @abc.abstractmethod
+    def read(self): ...
+
+class S3Store(BaseStore, lazily_create_for_abstract_parents=True):
+    def read(self):
+        return 'from-s3'
+
+assert type(BaseStore.grab()) is S3Store
+```
+
+Without it, `BaseStore.grab()` tries to construct `BaseStore` and dies with
+`TypeError: Can't instantiate abstract class`. The point of an abstract Dependency is that code
+depends on the base while something else supplies the implementation; this wires that up in one
+flag.
+
+An ancestor is only considered if it inherits from `Dependency`. Abstract mixins and plain
+`abc.ABC` bases that aren't dependencies are skipped, since nothing would ever ask an `XContext`
+for them.
+
+Of those, an ancestor counts as abstract if either:
+
+- It has unimplemented abstract methods, ie: `inspect.isabstract` is `True`.
+- It declared its self an ABC (`abc.ABC` in its own bases, or `metaclass=abc.ABCMeta`), even with
+  no abstract methods on it. We check what the class its self declared, since `abc.ABCMeta` is
+  inherited by every descendant, concrete ones included.
+
+All abstract ancestors are claimed, nearest-first, and merged with anything you list in
+`lazily_create_for`. `Dependency` and `DependencyPerThread` are never claimed; neither is abstract.
+
+If the flag is `True` but no abstract ancestor is found, you get a `UserWarning` and nothing is
+claimed — that usually means the base stopped being abstract. Two concrete subclasses of the same
+abstract base that both set this will collide, later definition winning, with a warning.
+
+## `inject_for`
+
+Maps your dependency for extra types whenever an instance of it lands in a context. Unlike
+`lazily_create_for` it does nothing on its own — it only applies to instances that actually get
+added, which makes it a good fit for tests and temporary overrides:
+
+```python
+from xinject import Dependency
+
+class Auth(Dependency):
+    def token(self):
+        return real_token()
+
+class FakeAuth(Dependency, inject_for=Auth):
+    def token(self):
+        return 'fake-token'
+
+def test_something():
+    with FakeAuth():
+        assert Auth.grab().token() == 'fake-token'
+
+    # Outside the `with`, `Auth` is a plain `Auth` again.
+```
+
+This applies however the instance is added: a `with` statement, a function decorator,
+`XContext.add`, or the `dependencies` argument of `XContext`. Like `lazily_create_for`,
+it's not inherited.
+
+Anything listed in `lazily_create_for` is implicitly added to `inject_for` as well, so an instance
+you create and add yourself is found under the claimed types too.
 
 # Licensing
 
