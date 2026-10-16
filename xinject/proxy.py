@@ -151,3 +151,20 @@ class CurrentDependencyProxy(Generic[D]):
 
     def __setitem__(self, key, value):
         return self._get_active().__setitem__(key, value)
+
+    # Python looks these up on the type rather than going through `__getattribute__`, so each one
+    # a proxy should pass on has to be defined here.
+
+    def __delitem__(self, key):
+        del self._get_active()[key]
+
+    def __contains__(self, key) -> bool:
+        return key in self._get_active()
+
+    def __len__(self) -> int:
+        return len(self._get_active())
+
+    def __bool__(self) -> bool:
+        # Defined because `__len__` is: without it, `bool()` of a proxy would go through
+        # `__len__`, and raise for every dependency that has no length.
+        return bool(self._get_active())
