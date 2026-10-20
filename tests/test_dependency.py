@@ -156,3 +156,66 @@ def test_proxy_attribute():
 
     # Original MyData object is restored
     assert proxy__my_data.some_data == 'data-value'
+
+
+class _Bag(Dependency):
+    """ A dependency that acts like a container. """
+
+    def __init__(self):
+        self.items = {}
+
+    def __getitem__(self, key):
+        return self.items[key]
+
+    def __setitem__(self, key, value):
+        self.items[key] = value
+
+    def __delitem__(self, key):
+        del self.items[key]
+
+    def __contains__(self, key):
+        return key in self.items
+
+    def __len__(self):
+        return len(self.items)
+
+
+bag = _Bag.proxy()
+
+
+def test_proxy__passes_on_container_operations():
+    bag['a'] = 1
+
+    assert 'a' in bag
+    assert len(bag) == 1
+
+    del bag['a']
+
+    assert 'a' not in bag
+    assert len(bag) == 0
+
+
+def test_proxy__operations_reach_whichever_dependency_is_current():
+    bag['outer'] = 1
+
+    with _Bag():
+        assert 'outer' not in bag
+        bag['inner'] = 2
+        assert len(bag) == 1
+
+    assert 'inner' not in bag
+    assert 'outer' in bag
+
+
+def test_proxy__is_as_truthy_as_the_dependency():
+    assert not bag, 'an empty container is falsy, and so is its proxy'
+    bag['a'] = 1
+    assert bag
+
+
+def test_proxy__of_a_dependency_without_a_length__stays_truthy():
+    """ Defining `__len__` would otherwise make `bool()` of every such proxy raise. """
+    assert bool(my_class) is True
+
+    with pytest.raises(TypeError):
+        len(my_class)

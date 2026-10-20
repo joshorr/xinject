@@ -446,12 +446,15 @@ class Dependency:
         """
 
         Args:
-            remove_between_unittests: If `False` (default): Dependency will be removed from global context before/after
-                as each individual unit-test is run.  When `thread_sharable` is `False` this already happens because
+            remove_between_unittests: If `True` (default): Dependency will be removed from global context before/after
+                as each individual unit-test is run.
+
+                When `thread_sharable` is `False`, this happens regardless of this setting because
                 all non-global contexts are forgotten before/after each unit-test run.
-                This param controls what happens if the Dependency is in a global-context.  The global-context is
-                not cleared between each unit test run. This `remove_between_unittests` option allows you to opt-intl
-                this behavior if desired on a per-Dependency basis.
+
+                This param controls what happens if the Dependency is in a global-context.
+
+                If `False`: Dependency instance will stay in global-context between each individual unit test run.
 
             thread_sharable: If `False`: While a dependency is lazily auto-created, we will
                 ensure we do it per-thread, and not make it visible to other threads.
