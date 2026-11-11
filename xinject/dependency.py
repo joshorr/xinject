@@ -135,8 +135,8 @@ from copy import copy, deepcopy
 from xsentinels import Default
 from xsentinels.default import DefaultType
 
-from xinject import XContext, _private
-from xinject.errors import XInjectError
+from .context import XContext, _private, _XContextOrderedStore
+from .errors import XInjectError
 import sys
 
 T = TypeVar('T')
@@ -446,12 +446,15 @@ class Dependency:
         """
 
         Args:
-            remove_between_unittests: If `False` (default): Dependency will be removed from global context before/after
-                as each individual unit-test is run.  When `thread_sharable` is `False` this already happens because
+            remove_between_unittests: If `True` (default): Dependency will be removed from global context before/after
+                as each individual unit-test is run.
+
+                When `thread_sharable` is `False`, this happens regardless of this setting because
                 all non-global contexts are forgotten before/after each unit-test run.
-                This param controls what happens if the Dependency is in a global-context.  The global-context is
-                not cleared between each unit test run. This `remove_between_unittests` option allows you to opt-intl
-                this behavior if desired on a per-Dependency basis.
+
+                This param controls what happens if the Dependency is in a global-context.
+
+                If `False`: Dependency instance will stay in global-context between each individual unit test run.
 
             thread_sharable: If `False`: While a dependency is lazily auto-created, we will
                 ensure we do it per-thread, and not make it visible to other threads.
@@ -510,14 +513,8 @@ class Dependency:
 
                 See `Dependency.__copy__` for details.
 
-                We ourselves need to skip copying a specific internal property,
-                and there are other dependencies that need to do the same thing.
-
-                This is an easy way to accomplish that goal.
-
-                As a side note, we will always skip copying `_context_manager_stack` in addition to
-                what's set on `Dependency.__init_subclass__` attributes_to_skip_while_copying
-                class argument.
+                This is an easy way to skip copying internal attributes a dependency
+                should not share with its copies.
 
                 This can be dynamic if needed, by default it's consulted on the object each time
                 it's copied.
@@ -831,7 +828,7 @@ class Dependency:
 
         # Pop out of the dict-copy any attributes we should skip.
         attrs_to_skip = attributes_to_skip_while_copying(self) or []
-        for attr_to_skip in ['_context_manager_stack', *attrs_to_skip]:
+        for attr_to_skip in attrs_to_skip:
             dict_copy.pop(attr_to_skip, None)
 
         for k, v in dict_copy.items():
@@ -842,11 +839,8 @@ class Dependency:
 
     def __deepcopy__(self, memo=None):
         # Collect a list of things to skip....
-        # We always need to have `_context_manager_stack`, subclasses can set
-        # `attributes_to_skip_while_copying` if they have additional ones they want to skip.
-        skip_attributes = {
-            x for x in ['_context_manager_stack', *(attributes_to_skip_while_copying(self) or [])]
-        }
+        # Subclasses can set `attributes_to_skip_while_copying` if they have attributes to skip.
+        skip_attributes = set(attributes_to_skip_while_copying(self) or [])
 
         # If we get called without a memo, allocate a blank dict.
         if memo is None:
@@ -873,33 +867,36 @@ class Dependency:
 
         return copy
 
-    _context_manager_stack: List[XContext] = None
-    """ Keeps track of context's we created when self (ie: `Dependency`) is used in a `with`
-        statement.  This MUST be reset when doing a copy of the dependency.
-    """
-
     def __enter__(self: R) -> R:
-        if self._context_manager_stack is None:
-            self._context_manager_stack = []
-
         # We make a new XContext object, and delegate context-management duties to it.
+        # We tag it with self, so `__exit__` can find it again in the current context stack.
+        #
+        # We don't keep a list of these contexts on self, as the same dependency instance
+        # could be used in `with` statements in several threads/asyncio-tasks at the same time.
+        # The context stack is already separate per thread/task, so we search that instead.
         context = XContext(dependencies=self, name=f"with:{self.__class__.__name__}")
-        self._context_manager_stack.append(context)
+        context._entered_for_dependency = self
         context.__enter__()
         return self
 
     def __exit__(self, *args, **kwargs):
-        stack = self._context_manager_stack
-        if not stack:
-            raise XInjectError(
-                f"While using ({self}) as a context manager via a `with` statement,"
-                f"somehow we did not have an internal context from the initial entering "
-                f"(see `xinject.dependency.Dependency.__enter__`). "
-                f"Indicates a very strange bug."
-            )
+        # With properly nested `with` statements, our context is the top of the stack,
+        # so this normally stops on the first item.
+        #
+        # We skip contexts made in other threads. This thread can see those if it inherited
+        # another thread's `contextvars`, but it never entered them, so it must not exit them.
+        for context in _XContextOrderedStore.storage().iter_newest_first(current_thread_only=True):
+            if context._entered_for_dependency is self:
+                context.__exit__(*args, **kwargs)
+                return
 
-        context = stack.pop()
-        context.__exit__(*args, **kwargs)
+        raise XInjectError(
+            f"While using ({self}) as a context manager via a `with` statement, "
+            f"could not find the internal context made when the `with` statement was entered "
+            f"(see `xinject.dependency.Dependency.__enter__`). "
+            f"This can happen if `__exit__` is called in a different thread/asyncio-task "
+            f"than `__enter__` was."
+        )
 
     def __call__(self, func):
         """

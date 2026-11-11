@@ -1,4 +1,4 @@
-from xinject import XContext, Dependency
+from xinject import XContext, Dependency, DependencyPerThread
 import dataclasses
 import pytest
 from copy import deepcopy, copy
@@ -236,3 +236,62 @@ def test_skip_attrs_on_resource_copy():
 
     assert r3.my_attribute == "hello-1"
     assert r3.my_other_attr == "changed_value-2.2"
+
+
+class _FastPathDependency(Dependency):
+    pass
+
+
+class _FastPathPerThreadDependency(DependencyPerThread):
+    pass
+
+
+def test_dependency_lookup__found_in_self_skips_chain_walk(monkeypatch):
+    dep = _FastPathDependency()
+
+    with XContext(dependencies=[dep]) as ctx:
+        def fail(*args, **kwargs):
+            raise AssertionError("should have found the dependency in self, without the chain")
+
+        monkeypatch.setattr(XContext, '_find_dependency_in_chain', fail)
+        assert ctx.dependency(_FastPathDependency) is dep
+        assert _FastPathDependency.grab() is dep
+
+
+def test_dependency_lookup__not_in_self_still_walks_chain():
+    outer_dep = _FastPathDependency()
+
+    with XContext(dependencies=[outer_dep]):
+        with XContext() as inner_ctx:
+            assert inner_ctx.dependency(_FastPathDependency) is outer_dep
+
+
+def test_dependency_lookup__app_root_never_returns_non_thread_sharable():
+    from xinject.context import _app_root_context
+
+    # Normally can't happen; put one there directly to make sure the fast path won't return it.
+    _app_root_context._dependencies[_FastPathPerThreadDependency] = _FastPathPerThreadDependency()
+    try:
+        assert _app_root_context.dependency(_FastPathPerThreadDependency) is None
+    finally:
+        _app_root_context._dependencies.pop(_FastPathPerThreadDependency, None)
+
+
+def test_dependency_lookup__context_from_other_thread_skips_self_for_non_thread_sharable():
+    import threading
+
+    other_threads_dep = _FastPathPerThreadDependency()
+    ctx = XContext(dependencies=[other_threads_dep])
+    results = []
+
+    def other_thread():
+        results.append(ctx.dependency(_FastPathPerThreadDependency))
+
+    # `ctx` was made in this thread, so to the other thread it's "a context from another thread".
+    t = threading.Thread(target=other_thread)
+    t.start()
+    t.join(timeout=5)
+
+    assert len(results) == 1
+    assert results[0] is not None
+    assert results[0] is not other_threads_dep
