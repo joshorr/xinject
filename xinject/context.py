@@ -751,6 +751,21 @@ class XContext:
                 If `False`: only returns an object if we have it already, otherwise None.
         """
 
+        # Fast path: check self first, before any of the setup work for walking the chain below.
+        #
+        # This gives the same answer as the chain walk, because `ctx_chain` always yields self
+        # first when self was made in the current thread.
+        #
+        # We skip the fast path for:
+        # - The app-root: it must not hand out a non-thread-sharable dependency (see below).
+        #   It's made in the main thread, so the thread check alone would not catch it.
+        # - A context made in another thread: `ctx_chain` skips self for a non-thread-sharable
+        #   dependency in that case, so the full logic below has to decide.
+        if not self._is_app_root and self._thread_unique_id == _thread_storage.thread_unique_id:
+            obj = self._dependencies.get(for_type, None)
+            if obj is not None:
+                return obj
+
         # TODO: Decide if/when to bring back the cached dependencies.
         #   I have thoughts on the cache-key being the StorageObject or some such and then
         #   keeping track of all XContext instances weakly, etc;
