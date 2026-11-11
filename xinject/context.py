@@ -1140,7 +1140,7 @@ class XContext:
             The goal is to generally return self first, and then the next parent in the stack, etc.;
             but along the way yielding the special thread-root and app-root at the correct points.
 
-            General Algorthm:
+            General Algorithm:
             - Always yield self first, unless `include_self` is `False`.
 
             - If self is not active, we return the top of the stack; unless top of stack is from a different thread,
@@ -1373,6 +1373,16 @@ class XContext:
         This is mostly here for debugging purposes.
     """
 
+    _entered_for_dependency: Optional['Dependency'] = None
+    """
+    Set when a `xinject.dependency.Dependency` is used directly in a `with` statement
+    (ie: `with SomeDependency():`). The dependency makes a new `XContext` and sets itself here.
+
+    `Dependency.__exit__` then searches the current thread/task's context stack for the newest
+    context with this set to itself. This way the same dependency instance can be used in
+    `with` statements in multiple threads/asyncio-tasks at the same time.
+    """
+
     _sibling: Optional['XContext'] = None
     """
     If a `XContext` is activated a second time (perhaps when a function is called recursively, etc)
@@ -1506,6 +1516,29 @@ class _XContextOrderedStore:
 
     def copy(self) -> Self:
         return _XContextOrderedStore(self)
+
+    def iter_newest_first(self, current_thread_only: bool = False) -> Iterator[XContext]:
+        """ Lazily yields the contexts in this store, starting with the most recently pushed one
+            (ie: the top of the stack) and ending with the oldest.
+
+            Unlike `values` / `values_reversed`, this does not build a list first, so stopping
+            after the first few items is cheap.
+
+            The underlying dict is never changed once a store is the current storage
+            (`push` and `pop` change a copy), so it's safe to iterate this while contexts
+            are being pushed/popped.
+
+            Args:
+                current_thread_only: If `True`, skip contexts that were made in a different
+                    thread. A thread can see those when it inherits another thread's
+                    `contextvars` (ie: `asyncio.to_thread`, `contextvars.Context.run`, or
+                    free-threaded Python's `sys.flags.thread_inherit_context`).
+        """
+        if not current_thread_only:
+            return reversed(self._storage)
+
+        thread_unique_id = _thread_storage.thread_unique_id
+        return (c for c in reversed(self._storage) if c._thread_unique_id == thread_unique_id)
 
     @cached_property
     def values(self) -> list[XContext]:

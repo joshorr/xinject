@@ -219,3 +219,132 @@ def test_proxy__of_a_dependency_without_a_length__stays_truthy():
 
     with pytest.raises(TypeError):
         len(my_class)
+
+
+class _WithDep(Dependency):
+    """ Used to test using the same dependency instance in several `with` statements at once. """
+    pass
+
+
+def test_with_dependency__nested_with_on_same_instance():
+    dep = _WithDep()
+
+    with dep:
+        outer_ctx = XContext.grab()
+        with dep:
+            assert _WithDep.grab() is dep
+            assert XContext.grab() is not outer_ctx
+        assert _WithDep.grab() is dep
+        assert XContext.grab() is outer_ctx
+
+    assert _WithDep.grab() is not dep
+
+
+def test_with_dependency__exit_without_enter_raises():
+    from xinject.errors import XInjectError
+
+    with pytest.raises(XInjectError):
+        _WithDep().__exit__(None, None, None)
+
+
+def test_with_dependency__exit_in_thread_that_only_inherited_the_context_raises():
+    """ A thread that inherited our `contextvars` can see the context made by `with dep:`,
+        but it never entered it, so it must not be able to exit it.
+    """
+    import contextvars
+    import threading
+    from xinject.errors import XInjectError
+
+    dep = _WithDep()
+    errors = []
+
+    def other_thread():
+        try:
+            dep.__exit__(None, None, None)
+        except BaseException as e:
+            errors.append(e)
+
+    with dep:
+        inherited = contextvars.copy_context()
+        t = threading.Thread(target=inherited.run, args=(other_thread,))
+        t.start()
+        t.join(timeout=5)
+        assert _WithDep.grab() is dep
+
+    assert len(errors) == 1 and isinstance(errors[0], XInjectError), errors
+    assert _WithDep.grab() is not dep
+
+
+def test_with_dependency__same_instance_in_threads_at_same_time():
+    """ Thread 1 enters, then thread 2 enters, then thread 1 exits while thread 2 is still
+        inside its `with` statement. Each thread must exit its own context.
+    """
+    import threading
+
+    dep = _WithDep()
+    both_entered = threading.Barrier(2, timeout=5)
+    first_exited = threading.Event()
+    errors = []
+
+    def first():
+        try:
+            with dep:
+                both_entered.wait()
+                assert _WithDep.grab() is dep
+            assert _WithDep.grab() is not dep, "first thread should no longer have dep active"
+        except BaseException as e:
+            errors.append(e)
+        finally:
+            first_exited.set()
+
+    def second():
+        try:
+            with dep:
+                both_entered.wait()
+                assert first_exited.wait(timeout=5)
+                assert _WithDep.grab() is dep, "first thread exiting must not affect us"
+            assert _WithDep.grab() is not dep
+        except BaseException as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=first), threading.Thread(target=second)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, errors
+    assert _WithDep.grab() is not dep
+
+
+def test_with_dependency__same_instance_in_asyncio_tasks_at_same_time():
+    """ Same as the threaded test, but with two asyncio tasks interleaving on one thread. """
+    import asyncio
+
+    dep = _WithDep()
+
+    async def run():
+        first_entered = asyncio.Event()
+        first_exited = asyncio.Event()
+        second_entered = asyncio.Event()
+
+        async def first():
+            with dep:
+                first_entered.set()
+                await second_entered.wait()
+                assert _WithDep.grab() is dep
+            assert _WithDep.grab() is not dep, "first task should no longer have dep active"
+            first_exited.set()
+
+        async def second():
+            await first_entered.wait()
+            with dep:
+                second_entered.set()
+                await first_exited.wait()
+                assert _WithDep.grab() is dep, "first task exiting must not affect us"
+            assert _WithDep.grab() is not dep
+
+        await asyncio.wait_for(asyncio.gather(first(), second()), timeout=5)
+
+    asyncio.run(run())
+    assert _WithDep.grab() is not dep
