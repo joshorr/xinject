@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.12.0](https://github.com/joshorr/xinject/compare/v1.11.0...v1.12.0) (2026-11-11)
+
+
+### Features
+
+* allow dependency proxy to proxy a few more special dunder methods. ([71e6115](https://github.com/joshorr/xinject/commit/71e61154ce0cd12a496d2ffc078e8d7257a94f42))
+* allow multiple threads to use `with` on the same dependency object instance. ([5219388](https://github.com/joshorr/xinject/commit/5219388d2a23471d0ca65954e4c88dd08d820d3a))
+
 ## [1.11.0](https://github.com/joshorr/xinject/compare/v1.10.1...v1.11.0) (2026-08-26)
 
 
